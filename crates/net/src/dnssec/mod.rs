@@ -170,6 +170,7 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
             // DNSSEC handler chain can validate negative responses.
             Err(NetError::Dns(DnsError::NoRecordsFound(NoRecords {
                 query,
+                soa,
                 authorities,
                 response_code,
                 ..
@@ -182,6 +183,16 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
                 if let Some(authorities) = authorities {
                     for record in authorities.iter() {
                         msg.add_authority(record.clone());
+                    }
+                }
+
+                // Preserve the SOA record. It is carried in a dedicated field and may not be
+                // present in `authorities`, but `fetch_ds_records()` relies on it to recognize
+                // a legitimately insecure ancestor of a negative response.
+                if let Some(soa) = soa {
+                    let soa = soa.into_record_of_rdata();
+                    if !msg.authorities.iter().any(|r| r == &soa) {
+                        msg.add_authority(soa);
                     }
                 }
 
@@ -408,11 +419,15 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
             if self.request_depth > 1
                 && !matches!(
                     key.record_type,
-                    RecordType::DNSKEY | RecordType::DS | RecordType::NSEC | RecordType::NSEC3
+                    RecordType::DNSKEY
+                        | RecordType::DS
+                        | RecordType::NSEC
+                        | RecordType::NSEC3
+                        | RecordType::SOA
                 )
             {
                 // If we are at a depth greater than 1, we are only interested in proving evaluation chains.
-                // This means that only DNSKEY, DS, NSEC, and NSEC3 are interesting at that point.
+                // This means that only DNSKEY, DS, NSEC, NSEC3, and SOA are interesting at that point.
                 // This protects against looping over things like NS records and DNSKEYs in responses.
                 // TODO: is there a cleaner way to prevent cycles in the evaluations?
                 continue;
@@ -807,7 +822,7 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
                     // Case 4: There is an insecure delegation further up the tree.
                     if response
                         .all_sections()
-                        .any(|r| r.proof == Proof::Insecure && zone.zone_of(&r.name))
+                        .any(|r| insecure_ancestor_delegation(r, &zone))
                     {
                         debug!(
                             %zone,
@@ -2118,6 +2133,11 @@ fn find_nsec_covering_record<'a>(
     })
 }
 
+/// Returns whether `record` proves an insecure delegation at or above `zone`.
+fn insecure_ancestor_delegation(record: &Record, zone: &Name) -> bool {
+    record.proof == Proof::Insecure && record.name.zone_of(zone)
+}
+
 /// Logs a debug message and yields a Proof type for return
 pub(super) fn proof_log_yield(
     proof: Proof,
@@ -2160,7 +2180,10 @@ mod test {
         time::{Duration, Instant},
     };
 
-    use super::{Rrset, RrsigValidity, find_nsec_covering_record, no_closer_matches, verify_nsec};
+    use super::{
+        Rrset, RrsigValidity, find_nsec_covering_record, insecure_ancestor_delegation,
+        no_closer_matches, verify_nsec,
+    };
     use crate::{
         dnssec::{
             DnsRequestOptions, Proof, ProofError, ProofErrorKind, RrsetVerificationContext,
@@ -3239,6 +3262,52 @@ mod test {
             lifetime <= Duration::from_secs(60 * 5),
             "Bogus validation cached for {lifetime:?}, must be <= 5m",
         );
+    }
+
+    #[test]
+    fn ancestor_delegation() {
+        let zone = Name::from_ascii("mail.eu.example.").unwrap();
+        let insecure = |name: &str| {
+            let mut record = Record::from_rdata(
+                Name::from_ascii(name).unwrap(),
+                3600,
+                RData::A(rdata::A::new(10, 0, 0, 1)),
+            );
+            record.proof = Proof::Insecure;
+            record
+        };
+
+        // The zone itself and its ancestors (matched case-insensitively) are insecure ancestors.
+        assert!(insecure_ancestor_delegation(
+            &insecure("mail.eu.example."),
+            &zone
+        ));
+        assert!(insecure_ancestor_delegation(
+            &insecure("eu.example."),
+            &zone
+        ));
+        assert!(insecure_ancestor_delegation(&insecure("ExAmPlE."), &zone));
+
+        // Descendants and unrelated names are not ancestors.
+        assert!(!insecure_ancestor_delegation(
+            &insecure("host.mail.eu.example."),
+            &zone
+        ));
+        assert!(!insecure_ancestor_delegation(
+            &insecure("other.eu.example."),
+            &zone
+        ));
+        assert!(!insecure_ancestor_delegation(
+            &insecure("example.net."),
+            &zone
+        ));
+
+        // Only records with an insecure proof qualify, regardless of name.
+        for proof in [Proof::Secure, Proof::Bogus, Proof::Indeterminate] {
+            let mut record = insecure("eu.example.");
+            record.proof = proof;
+            assert!(!insecure_ancestor_delegation(&record, &zone));
+        }
     }
 
     /// Zone-wrap NSEC detection uses the intrinsic `next <= owner` property
