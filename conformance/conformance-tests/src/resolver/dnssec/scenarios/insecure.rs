@@ -261,7 +261,6 @@ fn no_ds_record_fixture(
 }
 
 #[test]
-#[ignore = "hickory incorrectly rejects an insecure delegation below another insecure delegation"]
 fn two_insecure_delegations() -> Result<(), Error> {
     let sign_settings = SignSettings::default();
     let network = Network::new()?;
