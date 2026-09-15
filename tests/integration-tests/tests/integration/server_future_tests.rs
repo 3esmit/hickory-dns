@@ -198,32 +198,15 @@ fn read_file(path: &str) -> Vec<u8> {
 #[tokio::test]
 #[allow(clippy::uninlined_format_args)]
 async fn test_server_www_tls() {
-    use hickory_proto::rustls::tls_server;
-    use std::env;
-    use std::path::Path;
+    use rustls::pki_types::PrivatePkcs8KeyDer;
+    use test_support::tls::TestIdentity;
 
     let dns_name = "ns.example.com";
 
-    let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "../..".to_owned());
-    println!("using server src path: {}", server_path);
-
-    let ca = tls_server::read_cert(Path::new(&format!(
-        "{}/tests/test-data/ca.pem",
-        server_path
-    )))
-    .map_err(|e| format!("error reading cert: {e}"))
-    .unwrap();
-    let cert = tls_server::read_cert(Path::new(&format!(
-        "{}/tests/test-data/cert.pem",
-        server_path
-    )))
-    .map_err(|e| format!("error reading cert: {e}"))
-    .unwrap();
-    let key = tls_server::read_key(Path::new(&format!(
-        "{}/tests/test-data/cert.key",
-        server_path
-    )))
-    .unwrap();
+    let identity = TestIdentity::new(dns_name).unwrap();
+    let ca = vec![CertificateDer::from(identity.ca.to_der().unwrap())];
+    let cert = vec![CertificateDer::from(identity.cert.to_der().unwrap())];
+    let key = PrivatePkcs8KeyDer::from(identity.key.private_key_to_pkcs8().unwrap()).into();
 
     let cert_key = (cert, key);
 

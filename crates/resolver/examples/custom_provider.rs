@@ -10,7 +10,7 @@ use {
     },
     std::future::Future,
     std::io,
-    std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    std::net::SocketAddr,
     std::pin::Pin,
     std::time::Duration,
     tokio::net::{TcpSocket, TcpStream, UdpSocket},
@@ -80,22 +80,15 @@ impl RuntimeProvider for PrintProvider {
 }
 
 #[cfg(any(feature = "webpki-roots", feature = "native-certs"))]
-async fn lookup_test<R: ConnectionProvider>(resolver: Resolver<R>) {
+async fn lookup<R: ConnectionProvider>(
+    resolver: &Resolver<R>,
+) -> hickory_resolver::lookup_ip::LookupIp {
     let response = resolver.lookup_ip("www.example.com.").await.unwrap();
 
     // There can be many addresses associated with the name,
     //  this can return IPv4 and/or IPv6 addresses
-    let address = response.iter().next().expect("no addresses returned!");
-    if address.is_ipv4() {
-        assert_eq!(address, IpAddr::V4(Ipv4Addr::new(93, 184, 215, 14)));
-    } else {
-        assert_eq!(
-            address,
-            IpAddr::V6(Ipv6Addr::new(
-                0x2606, 0x2800, 0x21f, 0xcb07, 0x6820, 0x80da, 0xaf6b, 0x8b2c
-            ))
-        );
-    }
+    assert!(response.iter().next().is_some(), "no addresses returned!");
+    response
 }
 
 #[cfg(any(feature = "webpki-roots", feature = "native-certs"))]
@@ -106,7 +99,9 @@ async fn main() {
         ResolverOpts::default(),
         GenericConnector::new(PrintProvider::default()),
     );
-    lookup_test(resolver).await;
+    for address in lookup(&resolver).await.iter() {
+        println!("{address}");
+    }
 
     #[cfg(feature = "dns-over-https-rustls")]
     {
@@ -115,7 +110,9 @@ async fn main() {
             ResolverOpts::default(),
             GenericConnector::new(PrintProvider::default()),
         );
-        lookup_test(resolver2).await;
+        for address in lookup(&resolver2).await.iter() {
+            println!("{address}");
+        }
     }
 
     println!("Hello, world!");
@@ -127,6 +124,16 @@ fn main() {
 }
 
 #[test]
+#[cfg(not(any(feature = "webpki-roots", feature = "native-certs")))]
 fn test_custom_provider() {
     main()
 }
+
+#[cfg(all(test, any(feature = "webpki-roots", feature = "native-certs")))]
+use hickory_resolver::{config, proto};
+#[cfg(all(test, any(feature = "webpki-roots", feature = "native-certs")))]
+#[path = "../src/local_dns.rs"]
+mod local_dns;
+#[cfg(all(test, any(feature = "webpki-roots", feature = "native-certs")))]
+#[path = "custom_provider/tests.rs"]
+mod tests;

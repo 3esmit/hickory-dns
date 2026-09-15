@@ -68,7 +68,7 @@ impl InMemoryAuthority {
     /// # Arguments
     ///
     /// * `origin` - The zone `Name` being created, this should match that of the `RecordType::SOA`
-    ///              record.
+    ///   record.
     /// * `records` - The map of the initial set of records in the zone.
     /// * `zone_type` - The type of zone, i.e. is this authoritative?
     /// * `allow_axfr` - Whether AXFR is allowed.
@@ -468,7 +468,7 @@ impl InnerInMemory {
     /// * next_name - the name from the CNAME, ANAME, MX, etc. record that is being searched
     /// * search_type - the root search type, ANAME, CNAME, MX, i.e. the beginning of the chain
     /// * lookup_options - Query-related lookup options (e.g., DNSSEC DO bit, supported hash
-    ///                    algorithms, etc.)
+    ///   algorithms, etc.)
     fn additional_search(
         &self,
         original_name: &LowerName,
@@ -1455,7 +1455,7 @@ impl Authority for InMemoryAuthority {
                         .map(Record::data)
                         .and_then(RData::as_dnssec)
                         .and_then(DNSSECRData::as_nsec)
-                        .map_or(false, |r| {
+                        .is_some_and(|r| {
                             // the search name is less than the next NSEC record
                             *name < r.next_domain_name().into() ||
                             // this is the last record, and wraps to the beginning of the zone

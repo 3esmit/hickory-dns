@@ -1,15 +1,17 @@
-#[cfg(feature = "dnssec")]
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use std::future::Future;
 use std::net::*;
-#[cfg(feature = "dnssec")]
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use std::pin::Pin;
 #[cfg(feature = "dnssec")]
 use std::str::FromStr;
 #[cfg(feature = "dnssec")]
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
+use std::sync::Mutex as StdMutex;
 
 use futures::TryStreamExt;
-#[cfg(feature = "dnssec")]
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use time::Duration;
 
 #[cfg(feature = "dnssec")]
@@ -18,40 +20,42 @@ use hickory_client::client::{Client, ClientHandle};
 use hickory_client::ClientErrorKind;
 #[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use hickory_integration::example_authority::create_example;
-#[cfg(feature = "dnssec")]
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use hickory_integration::TestClientStream;
 use hickory_integration::{GOOGLE_V4, TEST3_V4};
 #[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use hickory_proto::dnssec::rdata::{DNSSECRData, KEY};
 #[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use hickory_proto::dnssec::{openssl::RsaSigningKey, Algorithm, PublicKey, SigSigner, SigningKey};
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
+use hickory_proto::op::MessageFinalizer;
+#[cfg(feature = "dnssec")]
+use hickory_proto::op::ResponseCode;
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query};
-#[cfg(feature = "dnssec")]
-use hickory_proto::op::{MessageFinalizer, ResponseCode};
 use hickory_proto::rr::rdata::opt::{EdnsCode, EdnsOption};
-#[cfg(feature = "dnssec")]
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use hickory_proto::rr::Record;
 use hickory_proto::rr::{rdata::A, DNSClass, Name, RData, RecordType};
 use hickory_proto::runtime::TokioRuntimeProvider;
 use hickory_proto::tcp::TcpClientStream;
 use hickory_proto::udp::UdpClientStream;
-#[cfg(feature = "dnssec")]
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use hickory_proto::xfer::DnsMultiplexerConnect;
 use hickory_proto::xfer::{DnsHandle, DnsMultiplexer};
-#[cfg(feature = "dnssec")]
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use hickory_proto::ProtoError;
 use hickory_proto::ProtoErrorKind;
-#[cfg(feature = "dnssec")]
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use hickory_server::authority::{Authority, Catalog};
 #[cfg(feature = "dnssec")]
 use test_support::subscribe;
 
-#[cfg(feature = "dnssec")]
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
 pub struct TestClientConnection {
     catalog: Arc<StdMutex<Catalog>>,
 }
 
-#[cfg(feature = "dnssec")]
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
 impl TestClientConnection {
     pub fn new(catalog: Catalog) -> TestClientConnection {
         TestClientConnection {
@@ -121,8 +125,32 @@ async fn test_query_udp() {
 #[tokio::test]
 #[allow(deprecated)]
 async fn test_query_udp_edns() {
-    let client = udp_client(GOOGLE_V4).await;
-    test_query_edns(client).await;
+    let socket = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = socket.local_addr().unwrap();
+    let server = async {
+        let mut bytes = [0; 4096];
+        let (length, peer) = socket.recv_from(&mut bytes).await.unwrap();
+        let response = super::client_future_tests::local_query_response(&bytes[..length], true);
+        assert_eq!(
+            socket.send_to(&response, peer).await.unwrap(),
+            response.len()
+        );
+    };
+    let client = async {
+        let stream = UdpClientStream::builder(address, TokioRuntimeProvider::default()).build();
+        let (client, background) = Client::connect(stream).await.unwrap();
+        tokio::select! {
+            _ = test_query_edns(client) => {}
+            result = background => panic!("EDNS driver ended before response: {result:?}"),
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(server, client);
+    })
+    .await
+    .expect("local EDNS timeout");
 }
 
 #[tokio::test]
@@ -237,8 +265,23 @@ async fn test_secure_query_example_udp() {
 #[cfg(feature = "dnssec")]
 async fn test_secure_query_example_tcp() {
     subscribe();
-    let client = tcp_dnssec_client(GOOGLE_V4).await;
-    test_secure_query_example(client).await;
+    use super::local_signed_dns::{drive, SignedDns};
+    use hickory_server::dnssec::NxProofKind;
+
+    SignedDns::new(NxProofKind::Nsec)
+        .await
+        .run(|address, anchor| async move {
+            let (stream, sender) =
+                TcpClientStream::new(address, None, None, TokioRuntimeProvider::default());
+            let multiplexer = DnsMultiplexer::new(stream, sender, None);
+            let (client, background) = DnssecClient::builder(multiplexer)
+                .trust_anchor(anchor)
+                .build()
+                .await
+                .unwrap();
+            drive(background, test_secure_query_example(client)).await;
+        })
+        .await;
 }
 
 #[cfg(feature = "dnssec")]
@@ -263,6 +306,7 @@ async fn test_secure_query_example(mut client: DnssecClient) {
     );
 
     let record = &response.answers()[0];
+    assert_eq!(record.proof(), hickory_proto::dnssec::Proof::Secure);
     assert_eq!(record.name(), &name);
     assert_eq!(record.record_type(), RecordType::A);
     assert_eq!(record.dns_class(), DNSClass::IN);
@@ -403,15 +447,66 @@ async fn test_nsec_query_type() {
 #[tokio::test]
 #[cfg(feature = "dnssec")]
 async fn test_nsec3_nxdomain() {
-    let name = Name::from_labels(vec!["a", "b", "c", "example", "com"]).unwrap();
+    use super::local_signed_dns::{drive, SignedDns};
+    use hickory_proto::dnssec::{Nsec3HashAlgorithm, Proof};
+    use hickory_server::dnssec::NxProofKind;
 
-    let mut client = tcp_dnssec_client(GOOGLE_V4).await;
-    let response = client
-        .query(name, DNSClass::IN, RecordType::NS)
-        .await
-        .expect("Query failed");
-
-    assert_eq!(response.response_code(), ResponseCode::NXDomain);
+    SignedDns::new(NxProofKind::Nsec3 {
+        algorithm: Nsec3HashAlgorithm::default(),
+        salt: Arc::from([1, 2, 3]),
+        iterations: 1,
+    })
+    .await
+    .run(|address, anchor| async move {
+        let (stream, sender) =
+            TcpClientStream::new(address, None, None, TokioRuntimeProvider::default());
+        let multiplexer = DnsMultiplexer::new(stream, sender, None);
+        let (mut client, background) = DnssecClient::builder(multiplexer)
+            .trust_anchor(anchor)
+            .build()
+            .await
+            .unwrap();
+        drive(background, async {
+            let mut saw_multiple_proofs = false;
+            for name in [
+                "a.b.c.example.com.",
+                "nonexistent.example.com.",
+                "a.www.example.com.",
+            ] {
+                let name = Name::from_ascii(name).unwrap();
+                let response = client
+                    .query(name.clone(), DNSClass::IN, RecordType::NS)
+                    .await
+                    .expect("Query failed");
+                assert_eq!(response.response_code(), ResponseCode::NXDomain);
+                assert!(response.answers().is_empty());
+                assert_eq!(response.queries(), &[Query::query(name, RecordType::NS)]);
+                assert!(response
+                    .name_servers()
+                    .iter()
+                    .any(|record| record.record_type() == RecordType::NSEC3));
+                saw_multiple_proofs |= response
+                    .name_servers()
+                    .iter()
+                    .filter(|record| record.record_type() == RecordType::NSEC3)
+                    .count()
+                    > 1;
+                for (index, record) in response.name_servers().iter().enumerate() {
+                    assert!(
+                        !response.name_servers()[..index].contains(record),
+                        "duplicate proof record: {record:?}"
+                    );
+                    assert_eq!(record.proof(), Proof::Secure, "{record:?}");
+                }
+            }
+            assert!(
+                saw_multiple_proofs,
+                "distinct proof records must also be preserved"
+            );
+        })
+        .await;
+    })
+    .await;
 }
 
 #[tokio::test]

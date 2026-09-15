@@ -265,9 +265,11 @@ impl From<Token> for LexToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dnssec::rdata::DNSKEY;
     #[cfg(feature = "dnssec-ring")]
     use crate::dnssec::ring::EcdsaSigningKey;
-    use crate::dnssec::{rdata::DNSKEY, Algorithm, PublicKey, SigningKey};
+    #[cfg(feature = "dnssec-ring")]
+    use crate::dnssec::{Algorithm, PublicKey, SigningKey};
 
     const ENCODED: &str = "aGVsbG8=";
 

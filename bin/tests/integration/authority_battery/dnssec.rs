@@ -345,7 +345,7 @@ pub fn test_rfc_6975_supported_algorithms<A: Authority<Lookup = AuthLookup>>(
             .collect();
 
         assert!(!rrsig_records.is_empty());
-        verify(&a_records, &rrsig_records, &[key.clone()]);
+        verify(&a_records, &rrsig_records, std::slice::from_ref(key));
     }
 }
 

@@ -7,16 +7,18 @@
 
 #![allow(clippy::print_stdout)] // this is a test module
 
-use std::{env, net::SocketAddr, path::Path, str::FromStr, sync::Arc};
+use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
 use futures_util::StreamExt;
-use rustls::{ClientConfig, KeyLogFile};
+use rustls::{
+    pki_types::{CertificateDer, PrivatePkcs8KeyDer},
+    ClientConfig, KeyLogFile,
+};
 
 use crate::{
     op::{Message, Query},
     quic::QuicClientStreamBuilder,
     rr::{Name, RecordType},
-    rustls::tls_server,
     xfer::DnsRequestSender,
 };
 
@@ -48,21 +50,15 @@ async fn server_responder(mut server: QuicServer) {
 async fn test_quic_stream() {
     let dns_name = "ns.example.com";
 
-    let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "../..".to_owned());
-    println!("using server src path: {server_path}");
-
-    let ca = tls_server::read_cert(Path::new(&format!("{server_path}/tests/test-data/ca.pem")))
-        .map_err(|e| format!("error reading cert: {e}"))
-        .unwrap();
-    let cert = tls_server::read_cert(Path::new(&format!(
-        "{server_path}/tests/test-data/cert.pem"
-    )))
-    .map_err(|e| format!("error reading cert: {e}"))
-    .unwrap();
-    let key = tls_server::read_key(Path::new(&format!(
-        "{server_path}/tests/test-data/cert.key"
-    )))
-    .unwrap();
+    let identity = crate::tests::tls::TestIdentity::new(dns_name).expect("test identity");
+    let ca = [CertificateDer::from(
+        identity.ca.to_der().expect("root DER"),
+    )];
+    let cert = vec![CertificateDer::from(
+        identity.cert.to_der().expect("server DER"),
+    )];
+    let key =
+        PrivatePkcs8KeyDer::from(identity.key.private_key_to_pkcs8().expect("server key")).into();
 
     // All testing is only done on local addresses, construct the server
     let quic_ns = QuicServer::new(SocketAddr::from(([127, 0, 0, 1], 0)), cert, key)
@@ -121,4 +117,9 @@ async fn test_quic_stream() {
 
     // and finally kill the server
     server_join.abort();
+    let stopped = server_join.await.expect_err("server must stop after abort");
+    assert!(
+        stopped.is_cancelled(),
+        "server failed before cleanup: {stopped}"
+    );
 }

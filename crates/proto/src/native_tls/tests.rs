@@ -12,8 +12,6 @@
     clippy::single_component_path_imports
 )]
 
-use std::env;
-use std::fs::File;
 use std::io::{Read, Write};
 #[cfg(not(target_os = "linux"))]
 use std::net::Ipv6Addr;
@@ -51,20 +49,11 @@ fn test_tls_client_stream_ipv4() {
 #[cfg(not(target_os = "linux"))] // ignored until Travis-CI fixes IPv6
 #[cfg(not(target_os = "macos"))] // certificates are failing on macOS now
 fn test_tls_client_stream_ipv6() {
-    tls_client_stream_test(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)), false)
+    tls_client_stream_test(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)))
 }
 
 const TEST_BYTES: &[u8; 8] = b"DEADBEEF";
 const TEST_BYTES_LEN: usize = 8;
-
-fn read_file(path: &str) -> Vec<u8> {
-    let mut bytes = vec![];
-
-    let mut file = File::open(path).unwrap_or_else(|_| panic!("failed to open file: {}", path));
-    file.read_to_end(&mut bytes)
-        .unwrap_or_else(|_| panic!("failed to read file: {}", path));
-    bytes
-}
 
 #[allow(unused, unused_mut)]
 fn tls_client_stream_test(server_addr: IpAddr) {
@@ -86,16 +75,11 @@ fn tls_client_stream_test(server_addr: IpAddr) {
         })
         .unwrap();
 
-    let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "../..".to_owned());
-    println!("using server src path: {server_path}");
-
-    let root_cert_der = read_file(&format!("{server_path}/tests/test-data/ca.der"));
-
-    // Generate X509 certificate
     let dns_name = "ns.example.com";
-    let cert = read_file(&format!("{server_path}/tests/test-data/cert.pem"));
-
-    let private_key = read_file(&format!("{server_path}/tests/test-data/cert-key.pk8"));
+    let identity = crate::tests::tls::TestIdentity::new(dns_name).expect("test identity");
+    let root_cert_der = identity.ca.to_der().expect("root DER");
+    let cert = identity.cert.to_pem().expect("server PEM");
+    let private_key = identity.key.private_key_to_pem_pkcs8().expect("server key");
     let identity =
         native_tls::Identity::from_pkcs8(&cert, &private_key).expect("Identity::from_pkcs8");
 

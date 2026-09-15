@@ -71,74 +71,24 @@ where
     ))
 }
 
-#[cfg(any(feature = "webpki-roots", feature = "native-certs"))]
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use crate::encrypted_tests::{https_rejects_identity, https_round_trip};
 
-    use tokio::runtime::Runtime;
-
-    use crate::config::{ResolverConfig, ResolverOpts};
-    use crate::name_server::TokioConnectionProvider;
-    use crate::TokioResolver;
-
-    fn https_test(config: ResolverConfig) {
-        let io_loop = Runtime::new().unwrap();
-
-        let resolver = TokioResolver::new(
-            config,
-            ResolverOpts {
-                try_tcp_on_error: true,
-                ..ResolverOpts::default()
-            },
-            TokioConnectionProvider::default(),
-        );
-
-        let response = io_loop
-            .block_on(resolver.lookup_ip("www.example.com."))
-            .expect("failed to run lookup");
-
-        assert_eq!(response.iter().count(), 1);
-        for address in response.iter() {
-            if address.is_ipv4() {
-                assert_eq!(address, IpAddr::V4(Ipv4Addr::new(93, 184, 215, 14)));
-            } else {
-                assert_eq!(
-                    address,
-                    IpAddr::V6(Ipv6Addr::new(
-                        0x2606, 0x2800, 0x21f, 0xcb07, 0x6820, 0x80da, 0xaf6b, 0x8b2c,
-                    ))
-                );
-            }
-        }
-
-        // check if there is another connection created
-        let response = io_loop
-            .block_on(resolver.lookup_ip("www.example.com."))
-            .expect("failed to run lookup");
-
-        assert_eq!(response.iter().count(), 1);
-        for address in response.iter() {
-            if address.is_ipv4() {
-                assert_eq!(address, IpAddr::V4(Ipv4Addr::new(93, 184, 215, 14)));
-            } else {
-                assert_eq!(
-                    address,
-                    IpAddr::V6(Ipv6Addr::new(
-                        0x2606, 0x2800, 0x21f, 0xcb07, 0x6820, 0x80da, 0xaf6b, 0x8b2c,
-                    ))
-                );
-            }
+    #[tokio::test]
+    async fn test_local_https_dns_name_and_ip() {
+        for name in ["ns.example.test", "127.0.0.1"] {
+            https_round_trip(name).await;
         }
     }
 
-    #[test]
-    fn test_google_https() {
-        https_test(ResolverConfig::google_https())
+    #[tokio::test]
+    async fn test_local_https_rejects_wrong_name() {
+        https_rejects_identity(true).await;
     }
 
-    #[test]
-    fn test_cloudflare_https() {
-        https_test(ResolverConfig::cloudflare_https())
+    #[tokio::test]
+    async fn test_local_https_rejects_untrusted_root() {
+        https_rejects_identity(false).await;
     }
 }

@@ -83,12 +83,41 @@ pub mod dnssec {
             #[serde(default)]
             algorithm: Nsec3HashAlgorithm,
             /// The salt used for hashing.
-            #[serde(default)]
+            #[serde(default = "empty_salt")]
             salt: Arc<[u8]>,
             /// The number of hashing iterations.
             #[serde(default)]
             iterations: u16,
         },
+    }
+
+    // Arc<[T]>::default requires a newer compiler than the declared MSRV.
+    fn empty_salt() -> Arc<[u8]> {
+        Arc::from([])
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn nsec3_salt_deserialization() {
+        let empty: NxProofKind = toml::from_str("[nsec3]").unwrap();
+        assert_eq!(
+            empty,
+            NxProofKind::Nsec3 {
+                algorithm: Nsec3HashAlgorithm::default(),
+                salt: Arc::from([]),
+                iterations: 0,
+            }
+        );
+        let configured: NxProofKind =
+            toml::from_str("[nsec3]\nsalt = [1, 2, 3]\niterations = 7").unwrap();
+        assert_eq!(
+            configured,
+            NxProofKind::Nsec3 {
+                algorithm: Nsec3HashAlgorithm::default(),
+                salt: Arc::from([1, 2, 3]),
+                iterations: 7,
+            }
+        );
     }
 }
 

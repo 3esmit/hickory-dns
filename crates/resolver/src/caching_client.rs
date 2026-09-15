@@ -188,8 +188,7 @@ where
             .client
             .lookup(query.clone(), options)
             .first_answer()
-            .await
-            .map_err(ProtoError::into);
+            .await;
 
         // TODO: technically this might be duplicating work, as name_server already performs this evaluation.
         //  we may want to create a new type, if evaluated... but this is most generic to support any impl in LookupState...
@@ -515,7 +514,6 @@ enum Records {
 mod tests {
     use std::net::*;
     use std::str::FromStr;
-    use std::time::*;
 
     use crate::proto::op::{Message, Query};
     use crate::proto::rr::rdata::{NS, SRV};

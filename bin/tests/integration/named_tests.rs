@@ -255,54 +255,31 @@ fn test_server_continues_on_bad_data_tcp() {
 #[test]
 #[cfg(feature = "resolver")]
 fn test_forward() {
-    use crate::server_harness::query_message;
-    use hickory_proto::rr::rdata::A;
+    use crate::server_harness::{fixture::TestConfig, query_a_with_background};
 
     subscribe();
     let provider = TokioRuntimeProvider::new();
 
-    named_test_harness("example_forwarder.toml", |socket_ports| {
-        let mut io_loop = Runtime::new().unwrap();
-        let tcp_port = socket_ports.get_v4(Protocol::Tcp);
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, tcp_port.expect("no tcp_port")));
-        let (stream, sender) = TcpClientStream::new(addr, None, None, provider.clone());
-        let client = Client::new(Box::new(stream), sender, None);
+    named_test_harness("example.toml", |upstream| {
+        let fixture = TestConfig::forwarder(&upstream);
+        fixture.run(|socket_ports| {
+            let mut io_loop = Runtime::new().unwrap();
+            let tcp_port = socket_ports.get_v4(Protocol::Tcp);
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, tcp_port.expect("no tcp_port")));
+            let (stream, sender) = TcpClientStream::new(addr, None, None, provider.clone());
+            let client = Client::new(Box::new(stream), sender, None);
 
-        let (mut client, bg) = io_loop.block_on(client).expect("client failed to connect");
-        hickory_proto::runtime::spawn_bg(&io_loop, bg);
+            let (mut client, bg) = io_loop.block_on(client).expect("client failed to connect");
+            query_a_with_background(&mut io_loop, &mut client, bg, false);
 
-        let response = query_message(
-            &mut io_loop,
-            &mut client,
-            Name::from_str("www.example.com").unwrap(),
-            RecordType::A,
-        )
-        .unwrap();
-        assert_eq!(
-            *response.answers()[0].data().as_a().unwrap(),
-            A::new(93, 184, 215, 14)
-        );
+            // just tests that multiple queries work
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, tcp_port.expect("no tcp_port")));
+            let (stream, sender) = TcpClientStream::new(addr, None, None, provider.clone());
+            let client = Client::new(Box::new(stream), sender, None);
 
-        // just tests that multiple queries work
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, tcp_port.expect("no tcp_port")));
-        let (stream, sender) = TcpClientStream::new(addr, None, None, provider.clone());
-        let client = Client::new(Box::new(stream), sender, None);
-
-        let (mut client, bg) = io_loop.block_on(client).expect("client failed to connect");
-        hickory_proto::runtime::spawn_bg(&io_loop, bg);
-
-        let response = query_message(
-            &mut io_loop,
-            &mut client,
-            Name::from_str("www.example.com").unwrap(),
-            RecordType::A,
-        )
-        .unwrap();
-        assert_eq!(
-            *response.answers()[0].data().as_a().unwrap(),
-            A::new(93, 184, 215, 14)
-        );
-        assert!(!response.header().authoritative());
+            let (mut client, bg) = io_loop.block_on(client).expect("client failed to connect");
+            query_a_with_background(&mut io_loop, &mut client, bg, false);
+        });
     })
 }
 

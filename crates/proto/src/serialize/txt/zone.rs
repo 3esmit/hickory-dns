@@ -478,7 +478,6 @@ impl<'a> Parser<'a> {
                 _ => return Err(ParseErrorKind::ParseTime(ttl_str.to_string()).into()),
             };
 
-            // `char_indices` yields byte offsets, which are valid string-slice boundaries.
             let number = u32::from_str(&ttl_str[start..i])
                 .map_err(|_| ParseErrorKind::ParseTime(ttl_str.to_string()))?;
 
@@ -500,7 +499,6 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(start) = state {
-            // `char_indices` yields byte offsets, which are valid string-slice boundaries.
             let number = u32::from_str(&ttl_str[start..])
                 .map_err(|_| ParseErrorKind::ParseTime(ttl_str.to_string()))?;
             value = value
@@ -530,6 +528,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_time_preserves_ascii_and_overflow_contracts() {
+        for (input, expected) in [
+            ("0", 0),
+            ("1h2m3s4", 3727),
+            ("1W1d", 691200),
+            ("4294967295", u32::MAX),
+            ("4294967295s0", u32::MAX),
+        ] {
+            assert_eq!(Parser::parse_time(input).unwrap(), expected, "{input}");
+        }
+        for input in ["", "s", "1ss", "4294967296", "4294967295s1", "7102w"] {
+            let error = Parser::parse_time(input).unwrap_err();
+            assert!(matches!(error.kind(), ParseErrorKind::ParseTime(value) if value == input));
+        }
+    }
+
+    #[test]
+    fn parse_time_rejects_unicode_before_slicing() {
+        // Non-ASCII input must preserve the original ParseTime error, not panic
+        // or accept Unicode digits as ASCII TTL syntax.
+        for input in ["é1", "1é", "1sé", "1m١", "１２s", "1\u{0301}s", "1h🦀2m"] {
+            let error = Parser::parse_time(input).unwrap_err();
+            assert!(matches!(error.kind(), ParseErrorKind::ParseTime(value) if value == input));
+        }
+    }
+
+    #[test]
     #[allow(clippy::uninlined_format_args)]
     fn test_zone_parse() {
         let domain = Name::from_str("parameter.origin.org.").unwrap();
@@ -549,12 +574,5 @@ mod tests {
             "unexpected success: {:#?}",
             result
         );
-    }
-
-    #[test]
-    fn parse_time_rejects_non_ascii_input_without_panicking() {
-        for value in ["µ", "1µ", "1µs", "1😀2s"] {
-            assert!(Parser::parse_time(value).is_err(), "input: {value}");
-        }
     }
 }

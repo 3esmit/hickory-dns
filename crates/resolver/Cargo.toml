@@ -104,8 +104,12 @@ webpki-roots = { workspace = true, optional = true }
 ipconfig = { workspace = true, optional = true }
 
 [dev-dependencies]
+bytes.workspace = true
+h2.workspace = true
+rustls = { workspace = true, features = ["ring"] }
+tokio-rustls.workspace = true
 futures-executor = { workspace = true, default-features = false, features = ["std"] }
-test-support.workspace = true
+test-support = { workspace = true, features = ["tls"] }
 tokio = { workspace = true, features = ["macros", "test-util"] }
 toml.workspace = true
 tracing-subscriber.workspace = true

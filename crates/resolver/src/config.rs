@@ -933,3 +933,99 @@ pub const QUAD9_IPS: &[IpAddr] = &[
     IpAddr::V6(Ipv6Addr::new(0x2620, 0x00fe, 0, 0, 0, 0, 0, 0x00fe)),
     IpAddr::V6(Ipv6Addr::new(0x2620, 0x00fe, 0, 0, 0, 0, 0x00fe, 0x0009)),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "dns-over-tls")]
+    #[test]
+    fn tls_presets_keep_addresses_and_names() {
+        for (config, addresses, name) in [
+            (ResolverConfig::google_tls(), GOOGLE_IPS, "dns.google"),
+            (
+                ResolverConfig::cloudflare_tls(),
+                CLOUDFLARE_IPS,
+                "cloudflare-dns.com",
+            ),
+        ] {
+            assert!(config.domain().is_none());
+            assert!(config.search().is_empty());
+            assert_eq!(config.name_servers().len(), addresses.len());
+            for (server, address) in config.name_servers().iter().zip(addresses) {
+                assert_eq!(server.socket_addr, SocketAddr::new(*address, 853));
+                assert_eq!(server.protocol, Protocol::Tls);
+                assert_eq!(server.tls_dns_name.as_deref(), Some(name));
+                assert!(server.trust_negative_responses);
+                assert!(server.bind_addr.is_none());
+                assert!(server.http_endpoint.is_none());
+                #[cfg(feature = "dns-over-rustls")]
+                assert!(server.tls_config.is_none());
+            }
+        }
+    }
+
+    #[cfg(any(feature = "dns-over-https-rustls", feature = "dns-over-h3"))]
+    #[test]
+    fn encrypted_http_presets_keep_addresses_and_names() {
+        let mut presets = Vec::new();
+        #[cfg(feature = "dns-over-https-rustls")]
+        presets.extend([
+            (
+                ResolverConfig::google_https(),
+                GOOGLE_IPS,
+                Protocol::Https,
+                "dns.google",
+            ),
+            (
+                ResolverConfig::cloudflare_https(),
+                CLOUDFLARE_IPS,
+                Protocol::Https,
+                "cloudflare-dns.com",
+            ),
+        ]);
+        #[cfg(feature = "dns-over-h3")]
+        presets.push((
+            ResolverConfig::google_h3(),
+            GOOGLE_IPS,
+            Protocol::H3,
+            "dns.google",
+        ));
+        for (config, addresses, protocol, name) in presets {
+            assert!(config.domain().is_none());
+            assert!(config.search().is_empty());
+            assert_eq!(config.name_servers().len(), addresses.len());
+            for (server, address) in config.name_servers().iter().zip(addresses) {
+                assert_eq!(server.socket_addr, SocketAddr::new(*address, 443));
+                assert_eq!(server.protocol, protocol);
+                assert_eq!(server.tls_dns_name.as_deref(), Some(name));
+                assert!(server.trust_negative_responses);
+                assert!(server.bind_addr.is_none());
+                assert!(server.http_endpoint.is_none());
+                assert!(server.tls_config.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn public_cleartext_presets_keep_udp_tcp_pairs() {
+        for (config, addresses) in [
+            (ResolverConfig::google(), GOOGLE_IPS),
+            (ResolverConfig::cloudflare(), CLOUDFLARE_IPS),
+        ] {
+            assert!(config.domain().is_none());
+            assert!(config.search().is_empty());
+            assert_eq!(config.name_servers().len(), addresses.len() * 2);
+            for (pair, address) in config.name_servers().chunks_exact(2).zip(addresses) {
+                for (server, protocol) in pair.iter().zip([Protocol::Udp, Protocol::Tcp]) {
+                    assert_eq!(server.socket_addr, SocketAddr::new(*address, 53));
+                    assert_eq!(server.protocol, protocol);
+                    assert!(server.trust_negative_responses);
+                    assert!(server.bind_addr.is_none());
+                    assert!(server.tls_dns_name.is_none());
+                    assert!(server.http_endpoint.is_none());
+                }
+            }
+        }
+    }
+}

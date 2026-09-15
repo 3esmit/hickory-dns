@@ -401,6 +401,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "dnssec-ring")]
     use crate::dnssec::ring::EcdsaSigningKey;
+    #[cfg(feature = "dnssec-ring")]
     use crate::dnssec::{rdata::DNSKEY, SigningKey};
 
     #[test]

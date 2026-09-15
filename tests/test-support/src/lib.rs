@@ -1,5 +1,8 @@
 use std::sync::Once;
 
+#[cfg(feature = "tls")]
+pub mod tls;
+
 /// Registers a global default tracing subscriber when called for the first time. This is intended
 /// for use in tests.
 pub fn subscribe() {

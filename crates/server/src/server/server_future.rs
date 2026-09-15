@@ -157,9 +157,9 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// # Arguments
     /// * `listener` - a bound TCP socket
     /// * `timeout` - timeout duration of incoming requests, any connection that does not send
-    ///               requests within this time period will be closed. In the future it should be
-    ///               possible to create long-lived queries, but these should be from trusted sources
-    ///               only, this would require some type of whitelisting.
+    ///   requests within this time period will be closed. In the future it should be
+    ///   possible to create long-lived queries, but these should be from trusted sources
+    ///   only, this would require some type of whitelisting.
     pub fn register_listener(&mut self, listener: net::TcpListener, timeout: Duration) {
         debug!("register tcp: {:?}", listener);
 
@@ -254,9 +254,9 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// # Arguments
     /// * `listener` - a bound TCP socket
     /// * `timeout` - timeout duration of incoming requests, any connection that does not send
-    ///               requests within this time period will be closed. In the future it should be
-    ///               possible to create long-lived queries, but these should be from trusted sources
-    ///               only, this would require some type of whitelisting.
+    ///   requests within this time period will be closed. In the future it should be
+    ///   possible to create long-lived queries, but these should be from trusted sources
+    ///   only, this would require some type of whitelisting.
     pub fn register_listener_std(
         &mut self,
         listener: std::net::TcpListener,
@@ -275,9 +275,9 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// # Arguments
     /// * `listener` - a bound TCP (needs to be on a different port from standard TCP connections) socket
     /// * `timeout` - timeout duration of incoming requests, any connection that does not send
-    ///               requests within this time period will be closed. In the future it should be
-    ///               possible to create long-lived queries, but these should be from trusted sources
-    ///               only, this would require some type of whitelisting.
+    ///   requests within this time period will be closed. In the future it should be
+    ///   possible to create long-lived queries, but these should be from trusted sources
+    ///   only, this would require some type of whitelisting.
     /// * `pkcs12` - certificate used to announce to clients
     #[cfg(all(feature = "dns-over-openssl", not(feature = "dns-over-rustls")))]
     pub fn register_tls_listener(
@@ -347,7 +347,7 @@ impl<T: RequestHandler> ServerFuture<T> {
                         Ok(tls_stream) => tls_stream,
                         Err(e) => {
                             debug!("tls handshake src: {} error: {}", src_addr, e);
-                            return ();
+                            return;
                         }
                     };
 
@@ -361,7 +361,7 @@ impl<T: RequestHandler> ServerFuture<T> {
                         Ok(()) => {}
                         Err(e) => {
                             debug!("tls handshake src: {} error: {}", src_addr, e);
-                            return ();
+                            return;
                         }
                     };
                     debug!("accepted TLS request from: {}", src_addr);
@@ -378,7 +378,7 @@ impl<T: RequestHandler> ServerFuture<T> {
                                 );
 
                                 // kill this connection
-                                return ();
+                                return;
                             }
                         };
 
@@ -415,9 +415,9 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// # Arguments
     /// * `listener` - a bound TCP (needs to be on a different port from standard TCP connections) socket
     /// * `timeout` - timeout duration of incoming requests, any connection that does not send
-    ///               requests within this time period will be closed. In the future it should be
-    ///               possible to create long-lived queries, but these should be from trusted sources
-    ///               only, this would require some type of whitelisting.
+    ///   requests within this time period will be closed. In the future it should be
+    ///   possible to create long-lived queries, but these should be from trusted sources
+    ///   only, this would require some type of whitelisting.
     /// * `pkcs12` - certificate used to announce to clients
     #[cfg(all(feature = "dns-over-openssl", not(feature = "dns-over-rustls")))]
     pub fn register_tls_listener_std(
@@ -442,9 +442,9 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// # Arguments
     /// * `listener` - a bound TCP (needs to be on a different port from standard TCP connections) socket
     /// * `timeout` - timeout duration of incoming requests, any connection that does not send
-    ///               requests within this time period will be closed. In the future it should be
-    ///               possible to create long-lived queries, but these should be from trusted sources
-    ///               only, this would require some type of whitelisting.
+    ///   requests within this time period will be closed. In the future it should be
+    ///   possible to create long-lived queries, but these should be from trusted sources
+    ///   only, this would require some type of whitelisting.
     /// * `tls_config` - rustls server config
     #[cfg(feature = "dns-over-rustls")]
     pub fn register_tls_listener_with_tls_config(
@@ -568,9 +568,9 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// # Arguments
     /// * `listener` - a bound TCP (needs to be on a different port from standard TCP connections) socket
     /// * `timeout` - timeout duration of incoming requests, any connection that does not send
-    ///               requests within this time period will be closed. In the future it should be
-    ///               possible to create long-lived queries, but these should be from trusted sources
-    ///               only, this would require some type of whitelisting.
+    ///   requests within this time period will be closed. In the future it should be
+    ///   possible to create long-lived queries, but these should be from trusted sources
+    ///   only, this would require some type of whitelisting.
     /// * `pkcs12` - certificate used to announce to clients
     #[cfg(feature = "dns-over-rustls")]
     pub fn register_tls_listener(
@@ -601,9 +601,9 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// # Arguments
     /// * `listener` - a bound TCP (needs to be on a different port from standard TCP connections) socket
     /// * `timeout` - timeout duration of incoming requests, any connection that does not send
-    ///               requests within this time period will be closed. In the future it should be
-    ///               possible to create long-lived queries, but these should be from trusted sources
-    ///               only, this would require some type of whitelisting.
+    ///   requests within this time period will be closed. In the future it should be
+    ///   possible to create long-lived queries, but these should be from trusted sources
+    ///   only, this would require some type of whitelisting.
     /// * `certificate_and_key` - certificate and key used to announce to clients
     #[cfg(feature = "dns-over-https-rustls")]
     pub fn register_https_listener(
@@ -726,9 +726,9 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// # Arguments
     /// * `listener` - a bound TCP (needs to be on a different port from standard TCP connections) socket
     /// * `timeout` - timeout duration of incoming requests, any connection that does not send
-    ///               requests within this time period will be closed. In the future it should be
-    ///               possible to create long-lived queries, but these should be from trusted sources
-    ///               only, this would require some type of whitelisting.
+    ///   requests within this time period will be closed. In the future it should be
+    ///   possible to create long-lived queries, but these should be from trusted sources
+    ///   only, this would require some type of whitelisting.
     /// * `pkcs12` - certificate used to announce to clients
     #[cfg(feature = "dns-over-quic")]
     pub fn register_quic_listener(
@@ -824,9 +824,9 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// # Arguments
     /// * `listener` - a bound TCP (needs to be on a different port from standard TCP connections) socket
     /// * `timeout` - timeout duration of incoming requests, any connection that does not send
-    ///               requests within this time period will be closed. In the future it should be
-    ///               possible to create long-lived queries, but these should be from trusted sources
-    ///               only, this would require some type of whitelisting.
+    ///   requests within this time period will be closed. In the future it should be
+    ///   possible to create long-lived queries, but these should be from trusted sources
+    ///   only, this would require some type of whitelisting.
     /// * `pkcs12` - certificate used to announce to clients
     #[cfg(feature = "dns-over-h3")]
     pub fn register_h3_listener(
@@ -1066,7 +1066,7 @@ pub(crate) async fn handle_request<R: ResponseHandler, T: RequestHandler>(
         let qflags = message.header().flags();
         let qop_code = message.op_code();
         let message_type = message.message_type();
-        let is_dnssec = message.edns().map_or(false, |edns| edns.flags().dnssec_ok);
+        let is_dnssec = message.edns().is_some_and(|edns| edns.flags().dnssec_ok);
 
         let request = Request::new(message, src_addr, protocol);
 

@@ -36,23 +36,21 @@ fn test_send_sync() {
 }
 
 #[test]
-fn test_lookup_google() {
-    use testing::lookup_test;
+fn test_lookup_ipv4() {
+    use testing::lookup_ipv4_test;
     let io_loop = AsyncStdConnectionProvider::new();
 
-    lookup_test::<AsyncStdConnectionProvider, AsyncStdConnectionProvider>(
-        ResolverConfig::google(),
+    lookup_ipv4_test::<AsyncStdConnectionProvider, AsyncStdConnectionProvider>(
         io_loop.clone(),
         io_loop,
     )
 }
 
 #[test]
-fn test_lookup_cloudflare() {
-    use testing::lookup_test;
+fn test_lookup_ipv6() {
+    use testing::lookup_ipv6_test;
     let io_loop = AsyncStdConnectionProvider::new();
-    lookup_test::<AsyncStdConnectionProvider, AsyncStdConnectionProvider>(
-        ResolverConfig::cloudflare(),
+    lookup_ipv6_test::<AsyncStdConnectionProvider, AsyncStdConnectionProvider>(
         io_loop.clone(),
         io_loop,
     )

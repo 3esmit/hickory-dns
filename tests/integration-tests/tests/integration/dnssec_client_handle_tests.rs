@@ -32,18 +32,39 @@ fn test_secure_query_example_udp() {
     with_udp(test_secure_query_example);
 }
 
-#[test]
-fn test_secure_query_example_tcp() {
-    with_tcp(test_secure_query_example);
+#[tokio::test]
+async fn test_secure_query_example_tcp() {
+    use super::local_signed_dns::{drive, SignedDns};
+    use hickory_server::dnssec::NxProofKind;
+
+    SignedDns::new(NxProofKind::Nsec)
+        .await
+        .run(|address, anchor| async move {
+            let (stream, sender) =
+                TcpClientStream::new(address, None, None, TokioRuntimeProvider::new());
+            let (client, background) = Client::new(stream, sender, None).await.unwrap();
+            let client = MemoizeClientHandle::new(client);
+            let secure_client = DnssecDnsHandle::with_trust_anchor(client, Arc::new(anchor));
+            drive(background, secure_query_example(secure_client)).await;
+        })
+        .await;
 }
 
-fn test_secure_query_example<H>(mut client: DnssecDnsHandle<H>, io_loop: Runtime)
+fn test_secure_query_example<H>(client: DnssecDnsHandle<H>, io_loop: Runtime)
+where
+    H: ClientHandle + Sync + 'static,
+{
+    io_loop.block_on(secure_query_example(client));
+}
+
+async fn secure_query_example<H>(mut client: DnssecDnsHandle<H>)
 where
     H: ClientHandle + Sync + 'static,
 {
     let name = Name::from_str("www.example.com").unwrap();
-    let response = io_loop
-        .block_on(client.query(name.clone(), DNSClass::IN, RecordType::A))
+    let response = client
+        .query(name.clone(), DNSClass::IN, RecordType::A)
+        .await
         .expect("query failed");
 
     println!("response records: {response:?}");

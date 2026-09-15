@@ -64,6 +64,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "dnssec-ring")]
     use crate::dnssec::ring::EcdsaSigningKey;
+    #[cfg(feature = "dnssec-ring")]
     use crate::dnssec::{PublicKey, SigningKey};
 
     const ENCODED: &str = "aGVsbG8=";
@@ -157,6 +158,7 @@ mod tests {
         assert!(err.to_string().contains("data encoding error"))
     }
 
+    #[cfg(feature = "dnssec-ring")]
     fn parse_ok(input: &str) -> DNSKEY {
         parse(input.split_whitespace()).expect("parsing failed")
     }

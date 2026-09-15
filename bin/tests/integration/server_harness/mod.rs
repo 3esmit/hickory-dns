@@ -1,3 +1,5 @@
+#[cfg(all(not(windows), any(feature = "resolver", feature = "dns-over-tls")))]
+pub mod fixture;
 pub mod mut_message_client;
 
 use std::{
@@ -76,9 +78,49 @@ fn collect_and_print<R: BufRead>(read: &mut R, output: &mut String) {
     }
 }
 
+struct HarnessCleanup {
+    succeeded: Arc<atomic::AtomicBool>,
+    killer: Option<thread::JoinHandle<()>>,
+    stdout: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for HarnessCleanup {
+    fn drop(&mut self) {
+        // Also cancel the watchdog and reap the child when startup itself panics.
+        self.succeeded.store(true, atomic::Ordering::Relaxed);
+        let mut failure = None;
+        for handle in [&mut self.killer, &mut self.stdout] {
+            if let Some(handle) = handle.take() {
+                if let Err(error) = handle.join() {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        if let Some(error) = failure {
+            if !thread::panicking() {
+                std::panic::resume_unwind(error);
+            }
+        }
+    }
+}
+
 /// Spins up a Server and handles shutting it down after running the test
 #[allow(dead_code)]
 pub fn named_test_harness<F, R>(toml: &str, test: F)
+where
+    F: FnOnce(SocketPorts) -> R + UnwindSafe,
+{
+    let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "..".to_owned());
+    named_test_harness_with_config(
+        std::path::Path::new(&server_path)
+            .join("tests/test-data/test_configs")
+            .join(toml)
+            .as_path(),
+        test,
+    );
+}
+
+fn named_test_harness_with_config<F, R>(config: &std::path::Path, test: F)
 where
     F: FnOnce(SocketPorts) -> R + UnwindSafe,
 {
@@ -93,9 +135,7 @@ where
             "hickory_dns=debug,hickory_client=debug,hickory_proto=debug,hickory_resolver=debug,hickory_server=debug",
         )
         .arg("-d")
-        .arg(format!(
-            "--config={server_path}/tests/test-data/test_configs/{toml}"
-        ))
+        .arg(format!("--config={}", config.display()))
         .arg(format!(
             "--zonedir={server_path}/tests/test-data/test_configs"
         ))
@@ -132,6 +172,7 @@ where
                 if let Err(e) = named.kill() {
                     warn!("warning: failed to kill named: {:?}", e);
                 }
+                named.wait().expect("failed to reap named");
             };
 
             for _ in 0..30 {
@@ -148,6 +189,11 @@ where
             std::process::exit(-1);
         })
         .expect("could not start thread killer");
+    let mut cleanup = HarnessCleanup {
+        succeeded: succeeded.clone(),
+        killer: Some(killer_join),
+        stdout: None,
+    };
 
     // These will be collected from the server startup'
     let mut socket_ports = SocketPorts::default();
@@ -206,33 +252,34 @@ where
 
     // spawn a thread to capture stdout
     let succeeded_clone = succeeded.clone();
-    thread::Builder::new()
-        .name("named stdout".into())
-        .spawn(move || {
-            let succeeded = succeeded_clone;
-            while !succeeded.load(atomic::Ordering::Relaxed) {
-                collect_and_print(&mut named_out, &mut output);
+    cleanup.stdout = Some(
+        thread::Builder::new()
+            .name("named stdout".into())
+            .spawn(move || {
+                let succeeded = succeeded_clone;
+                while !succeeded.load(atomic::Ordering::Relaxed) {
+                    collect_and_print(&mut named_out, &mut output);
 
-                if let Some(_ret_code) = named
-                    .lock()
-                    .unwrap()
-                    .try_wait()
-                    .expect("failed to check status of named")
-                {
-                    // uncomment for debugging:
-                    // println!("named exited with code: {}", _ret_code);
+                    if let Some(_ret_code) = named
+                        .lock()
+                        .unwrap()
+                        .try_wait()
+                        .expect("failed to check status of named")
+                    {
+                        // uncomment for debugging:
+                        // println!("named exited with code: {}", _ret_code);
+                    }
                 }
-            }
-        })
-        .expect("no thread available");
+            })
+            .expect("no thread available"),
+    );
 
     println!("running test...");
 
     let result = catch_unwind(move || test(socket_ports));
 
     println!("test completed");
-    succeeded.store(true, atomic::Ordering::Relaxed);
-    killer_join.join().expect("join failed");
+    drop(cleanup);
 
     assert!(result.is_ok(), "test failed");
 }
@@ -245,6 +292,43 @@ pub fn query_message<C: ClientHandle>(
 ) -> Result<DnsResponse, ClientError> {
     println!("sending request: {name} for: {record_type}");
     io_loop.block_on(client.query(name, DNSClass::IN, record_type))
+}
+
+#[cfg(all(not(windows), any(feature = "resolver", feature = "dns-over-tls")))]
+pub fn query_a_with_background<C: ClientHandle>(
+    runtime: &mut Runtime,
+    client: &mut C,
+    background: impl std::future::Future<Output = Result<(), hickory_proto::ProtoError>>,
+    authoritative: bool,
+) {
+    runtime.block_on(async {
+        let queries = async {
+            for _ in 0..2 {
+                let response = client
+                    .query(
+                        Name::from_ascii("www.example.com.").unwrap(),
+                        DNSClass::IN,
+                        RecordType::A,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.answers().len(), 1);
+                assert_eq!(
+                    response.answers()[0].data(),
+                    &RData::A(A::new(127, 0, 0, 1))
+                );
+                assert_eq!(response.authoritative(), authoritative);
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                _ = queries => {}
+                result = background => panic!("DNS driver ended before queries: {result:?}"),
+            }
+        })
+        .await
+        .expect("startup DNS query timeout");
+    });
 }
 
 // This only validates that a query to the server works, it shouldn't be used for more than this.

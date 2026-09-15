@@ -571,11 +571,10 @@ mod tests {
     use std::net::SocketAddr;
     use std::str::FromStr;
 
-    use rustls::KeyLogFile;
     use test_support::subscribe;
     use tokio::runtime::Runtime;
 
-    use crate::op::{Message, Query, ResponseCode};
+    use crate::op::{Message, Query};
     use crate::rr::rdata::{A, AAAA};
     use crate::rr::{Name, RecordType};
     use crate::runtime::TokioRuntimeProvider;
@@ -583,134 +582,6 @@ mod tests {
     use crate::xfer::{DnsRequestOptions, FirstAnswer};
 
     use super::*;
-
-    #[test]
-    fn test_https_google() {
-        subscribe();
-
-        let google = SocketAddr::from(([8, 8, 8, 8], 443));
-        let mut request = Message::new();
-        let query = Query::query(Name::from_str("www.example.com.").unwrap(), RecordType::A);
-        request.add_query(query);
-
-        let request = DnsRequest::new(request, DnsRequestOptions::default());
-
-        let mut client_config = client_config_h2();
-        client_config.key_log = Arc::new(KeyLogFile::new());
-
-        let provider = TokioRuntimeProvider::new();
-        let https_builder =
-            HttpsClientStreamBuilder::with_client_config(Arc::new(client_config), provider);
-        let connect =
-            https_builder.build(google, "dns.google".to_string(), "/dns-query".to_string());
-
-        // tokio runtime stuff...
-        let runtime = Runtime::new().expect("could not start runtime");
-        let mut https = runtime.block_on(connect).expect("https connect failed");
-
-        let response = runtime
-            .block_on(https.send_message(request).first_answer())
-            .expect("send_message failed");
-
-        let record = &response.answers()[0];
-        let addr = record.data().as_a().expect("Expected A record");
-
-        assert_eq!(addr, &A::new(93, 184, 215, 14));
-
-        //
-        // assert that the connection works for a second query
-        let mut request = Message::new();
-        let query = Query::query(
-            Name::from_str("www.example.com.").unwrap(),
-            RecordType::AAAA,
-        );
-        request.add_query(query);
-        let request = DnsRequest::new(request, DnsRequestOptions::default());
-
-        for _ in 0..3 {
-            let response = runtime
-                .block_on(https.send_message(request.clone()).first_answer())
-                .expect("send_message failed");
-            if response.response_code() == ResponseCode::ServFail {
-                continue;
-            }
-
-            let record = &response.answers()[0];
-            let addr = record
-                .data()
-                .as_aaaa()
-                .expect("invalid response, expected A record");
-
-            assert_eq!(
-                addr,
-                &AAAA::new(0x2606, 0x2800, 0x21f, 0xcb07, 0x6820, 0x80da, 0xaf6b, 0x8b2c)
-            );
-        }
-    }
-
-    #[test]
-    fn test_https_google_with_pure_ip_address_server() {
-        subscribe();
-
-        let google = SocketAddr::from(([8, 8, 8, 8], 443));
-        let mut request = Message::new();
-        let query = Query::query(Name::from_str("www.example.com.").unwrap(), RecordType::A);
-        request.add_query(query);
-
-        let request = DnsRequest::new(request, DnsRequestOptions::default());
-
-        let mut client_config = client_config_h2();
-        client_config.key_log = Arc::new(KeyLogFile::new());
-
-        let provider = TokioRuntimeProvider::new();
-        let https_builder =
-            HttpsClientStreamBuilder::with_client_config(Arc::new(client_config), provider);
-        let connect =
-            https_builder.build(google, google.ip().to_string(), "/dns-query".to_string());
-
-        // tokio runtime stuff...
-        let runtime = Runtime::new().expect("could not start runtime");
-        let mut https = runtime.block_on(connect).expect("https connect failed");
-
-        let response = runtime
-            .block_on(https.send_message(request).first_answer())
-            .expect("send_message failed");
-
-        let record = &response.answers()[0];
-        let addr = record.data().as_a().expect("Expected A record");
-
-        assert_eq!(addr, &A::new(93, 184, 215, 14));
-
-        //
-        // assert that the connection works for a second query
-        let mut request = Message::new();
-        let query = Query::query(
-            Name::from_str("www.example.com.").unwrap(),
-            RecordType::AAAA,
-        );
-        request.add_query(query);
-        let request = DnsRequest::new(request, DnsRequestOptions::default());
-
-        for _ in 0..3 {
-            let response = runtime
-                .block_on(https.send_message(request.clone()).first_answer())
-                .expect("send_message failed");
-            if response.response_code() == ResponseCode::ServFail {
-                continue;
-            }
-
-            let record = &response.answers()[0];
-            let addr = record
-                .data()
-                .as_aaaa()
-                .expect("invalid response, expected A record");
-
-            assert_eq!(
-                addr,
-                &AAAA::new(0x2606, 0x2800, 0x21f, 0xcb07, 0x6820, 0x80da, 0xaf6b, 0x8b2c)
-            );
-        }
-    }
 
     #[test]
     #[ignore] // cloudflare has been unreliable as a public test service.

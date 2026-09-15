@@ -26,8 +26,10 @@ use crate::proto::rr::{LowerName, Record, RecordSet, RecordType, RrsetRecords};
 /// * `'q` - the queries lifetime
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
+#[derive(Default)]
 pub enum AuthLookup {
     /// No records
+    #[default]
     Empty,
     // TODO: change the result of a lookup to a set of chained iterators...
     /// Records
@@ -127,12 +129,6 @@ impl LookupObject for AuthLookup {
             Some(true) => DnssecSummary::Secure,
             _ => DnssecSummary::Insecure,
         }
-    }
-}
-
-impl Default for AuthLookup {
-    fn default() -> Self {
-        Self::Empty
     }
 }
 
@@ -304,9 +300,10 @@ impl<'r> Iterator for AnyRecordsIter<'r> {
 }
 
 /// The result of a lookup
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub enum LookupRecords {
     /// The empty set of records
+    #[default]
     Empty,
     /// The associate records
     Records {
@@ -348,12 +345,6 @@ impl LookupRecords {
     /// Conversion to an iterator
     pub fn iter(&self) -> LookupRecordsIter<'_> {
         self.into_iter()
-    }
-}
-
-impl Default for LookupRecords {
-    fn default() -> Self {
-        Self::Empty
     }
 }
 

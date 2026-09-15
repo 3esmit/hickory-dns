@@ -52,7 +52,7 @@ impl Client {
     /// # Arguments
     ///
     /// * `stream` - A stream of bytes that can be used to send/receive DNS messages
-    ///              (see TcpClientStream or UdpClientStream)
+    ///   (see TcpClientStream or UdpClientStream)
     /// * `stream_handle` - The handle for the `stream` on which bytes can be sent/received.
     /// * `signer` - An optional signer for requests, needed for Updates with Sig0, otherwise not needed
     #[allow(clippy::new_ret_no_self)]
@@ -73,9 +73,9 @@ impl Client {
     /// # Arguments
     ///
     /// * `stream` - A stream of bytes that can be used to send/receive DNS messages
-    ///              (see TcpClientStream or UdpClientStream)
+    ///   (see TcpClientStream or UdpClientStream)
     /// * `timeout_duration` - All requests may fail due to lack of response, this is the time to
-    ///                        wait for a response before canceling the request.
+    ///   wait for a response before canceling the request.
     /// * `stream_handle` - The handle for the `stream` on which bytes can be sent/received.
     /// * `signer` - An optional signer for requests, needed for Updates with Sig0, otherwise not needed
     pub async fn with_timeout<F, S>(
@@ -459,7 +459,7 @@ pub trait ClientHandle: 'static + Clone + DnsHandle + Send {
     /// # Arguments
     ///
     /// * `rrset` - the record(s) to delete from a RRSet, the name, type and rdata must match the
-    ///              record to delete
+    ///   record to delete
     /// * `zone_origin` - the zone name to update, i.e. SOA name
     /// * `signer` - the signer, with private key, to use to sign the request
     ///
@@ -840,8 +840,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
-
     use super::*;
 
     use futures_util::stream::iter;
@@ -1070,50 +1068,79 @@ mod tests {
     #[tokio::test]
     async fn async_client() {
         use crate::client::{Client, ClientHandle};
+        use crate::wire_fixture;
         use hickory_proto::{
-            rr::{DNSClass, Name, RData, RecordType},
+            rr::{DNSClass, Name, RecordType},
             tcp::TcpClientStream,
         };
         use std::str::FromStr;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         // Since we used UDP in the previous examples, let's change things up a bit and use TCP here
-        let addr = SocketAddr::from(([8, 8, 8, 8], 53));
-        let (stream, sender) = TcpClientStream::new(addr, None, None, TokioRuntimeProvider::new());
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (done, finished) = futures_channel::oneshot::channel();
+        let serving = async {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            for _ in 0..2 {
+                let length = usize::from(socket.read_u16().await.unwrap());
+                assert!((12..=4096).contains(&length));
+                let mut buffer = vec![0; length];
+                socket.read_exact(&mut buffer).await.unwrap();
+                let reply = wire_fixture::reply(&buffer);
+                socket
+                    .write_u16(u16::try_from(reply.len()).unwrap())
+                    .await
+                    .unwrap();
+                socket.write_all(&reply).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+            finished.await.unwrap();
+        };
+        let querying = async {
+            let (stream, sender) =
+                TcpClientStream::new(addr, None, None, TokioRuntimeProvider::new());
 
-        // Create a new client, the bg is a background future which handles
-        //   the multiplexing of the DNS requests to the server.
-        //   the client is a handle to an unbounded queue for sending requests via the
-        //   background. The background must be scheduled to run before the client can
-        //   send any dns requests
-        let client = Client::new(stream, sender, None);
+            // Create a new client, the bg is a background future which handles
+            //   the multiplexing of the DNS requests to the server.
+            //   the client is a handle to an unbounded queue for sending requests via the
+            //   background. The background must be scheduled to run before the client can
+            //   send any dns requests
+            let client = Client::new(stream, sender, None);
 
-        // await the connection to be established
-        let (mut client, bg) = client.await.expect("connection failed");
+            // await the connection to be established
+            let (mut client, bg) = client.await.expect("connection failed");
 
-        // make sure to run the background task
-        tokio::spawn(bg);
+            // Keep the background driver owned until both responses are observed.
+            wire_fixture::drive(bg, async {
+                for _ in 0..2 {
+                    // Create a query future
+                    let query = client.query(
+                        Name::from_str("www.example.com.").unwrap(),
+                        DNSClass::IN,
+                        RecordType::A,
+                    );
 
-        // Create a query future
-        let query = client.query(
-            Name::from_str("www.example.com.").unwrap(),
-            DNSClass::IN,
-            RecordType::A,
-        );
+                    // wait for its response
+                    let (message_returned, buffer) = query.await.unwrap().into_parts();
 
-        // wait for its response
-        let (message_returned, buffer) = query.await.unwrap().into_parts();
+                    // validate it's what we expected
+                    assert_eq!(message_returned.answers(), &[wire_fixture::answer()]);
 
-        // validate it's what we expected
-        if let RData::A(addr) = message_returned.answers()[0].data() {
-            assert_eq!(*addr, A::new(93, 184, 215, 14));
-        }
+                    let message_parsed = Message::from_vec(&buffer).expect(
+                        "buffer was parsed already by Client so we should be able to do it again",
+                    );
 
-        let message_parsed = Message::from_vec(&buffer)
-            .expect("buffer was parsed already by Client so we should be able to do it again");
-
-        // validate it's what we expected
-        if let RData::A(addr) = message_parsed.answers()[0].data() {
-            assert_eq!(*addr, A::new(93, 184, 215, 14));
-        }
+                    // validate it's what we expected
+                    assert_eq!(message_parsed.answers(), &[wire_fixture::answer()]);
+                    assert_eq!(message_parsed, message_returned);
+                }
+                done.send(()).unwrap();
+            })
+            .await;
+        };
+        wire_fixture::run(serving, querying).await;
     }
 }

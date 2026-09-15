@@ -22,7 +22,7 @@ The `client` is capable of DNSSEC validation as well as offering higher order fu
 ## Example
 
 ```rust
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::str::FromStr;
 use hickory_client::client::{Client, ClientHandle};
 use hickory_client::proto::rr::{rdata::A, DNSClass, Name, RData, Record, RecordType};
@@ -55,7 +55,8 @@ let answers: &[Record] = response.answers();
 //  In order to access it we need to first check what type of record it is
 //  In this case we are interested in A, IPv4 address
 if let RData::A(A(ref ip)) = answers[0].data() {
-    assert_eq!(*ip, Ipv4Addr::new(93, 184, 215, 14))
+    // Public DNS answers can change; use the returned address.
+    println!("IPv4 address: {ip}");
 } else {
     panic!("unexpected result")
 }
