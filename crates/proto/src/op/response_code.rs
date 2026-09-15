@@ -61,8 +61,10 @@ use std::fmt::{Display, Formatter};
 ///  ```
 #[derive(Debug, Eq, PartialEq, PartialOrd, Copy, Clone, Hash)]
 #[allow(dead_code)]
+#[derive(Default)]
 pub enum ResponseCode {
     /// No Error [RFC 1035](https://tools.ietf.org/html/rfc1035)
+    #[default]
     NoError,
 
     /// Format Error [RFC 1035](https://tools.ietf.org/html/rfc1035)
@@ -179,12 +181,6 @@ impl ResponseCode {
             Self::BADCOOKIE => "Bad server cookie", // 23    BADCOOKIE (TEMPORARY - registered 2015-07-26, expires 2016-07-26)    Bad/missing server cookie    [draft-ietf-dnsop-cookies]
             Self::Unknown(_) => "Unknown response code",
         }
-    }
-}
-
-impl Default for ResponseCode {
-    fn default() -> Self {
-        Self::NoError
     }
 }
 

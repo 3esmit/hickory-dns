@@ -484,7 +484,7 @@ where
                         },
                         Err(_) => Self::Errored(Some(ProtoError::from(format!(
                             "bad dns_name: {}",
-                            &tls.dns_name
+                            tls.dns_name
                         )))),
                     }
                 }

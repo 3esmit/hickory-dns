@@ -34,17 +34,17 @@ mod verifier;
 pub use self::algorithm::Algorithm;
 pub use self::digest_type::DigestType;
 pub use self::nsec3::Nsec3HashAlgorithm;
+#[cfg(feature = "dnssec-openssl")]
+use self::openssl::{EcSigningKey, RsaSigningKey};
 pub use self::proof::{Proof, ProofError, ProofErrorKind, ProofFlags, Proven};
 pub use self::public_key::{PublicKey, PublicKeyBuf};
+#[cfg(feature = "dnssec-ring")]
+use self::ring::{EcdsaSigningKey, Ed25519SigningKey};
 pub use self::supported_algorithm::SupportedAlgorithms;
 pub use self::tbs::TBS;
 pub use self::trust_anchor::TrustAnchor;
 pub use self::verifier::Verifier;
 pub use crate::error::DnsSecResult;
-#[cfg(feature = "dnssec-openssl")]
-use openssl::{EcSigningKey, RsaSigningKey};
-#[cfg(feature = "dnssec-ring")]
-use ring::{EcdsaSigningKey, Ed25519SigningKey};
 
 #[cfg(all(not(feature = "dnssec-ring"), feature = "dnssec-openssl"))]
 pub use ::openssl::hash::DigestBytes as Digest;

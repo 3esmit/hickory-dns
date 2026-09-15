@@ -506,7 +506,7 @@ mod tests {
                 priority: 1,
                 params: vec![(
                     SvcParamKey::Key(667),
-                    SvcParamValue::Unknown(Unknown(b"hello".into())),
+                    SvcParamValue::Unknown(Unknown(b"hello".to_vec())),
                 )],
             },
             // Figure 6: A Generic Key and Quoted Value with a Decimal Escape
@@ -517,7 +517,7 @@ mod tests {
                 priority: 1,
                 params: vec![(
                     SvcParamKey::Key(667),
-                    SvcParamValue::Unknown(Unknown(b"hello\\210qoo".into())),
+                    SvcParamValue::Unknown(Unknown(b"hello\\210qoo".to_vec())),
                 )],
             },
             // Figure 7: Two Quoted IPv6 Hints

@@ -288,7 +288,7 @@ mod tests {
         let input = format!(".           34076   IN  DNSKEY  256 3 13 {encoded}");
 
         let records = parse_ok(&input);
-        let [record] = records.try_into().unwrap();
+        let [record]: [Record<DNSKEY>; 1] = records.try_into().unwrap();
         assert_eq!(&Name::root(), record.name());
         assert_eq!(Some(34076), record.ttl());
         assert_eq!(DNSClass::IN, record.dns_class());
@@ -316,7 +316,7 @@ mod tests {
         let input = format!(". IN DNSKEY 256 3 13 {encoded}");
 
         let records = parse_ok(&input);
-        let [record] = records.try_into().unwrap();
+        let [record]: [Record<DNSKEY>; 1] = records.try_into().unwrap();
         assert_eq!(&Name::root(), record.name());
         assert_eq!(None, record.ttl());
         assert_eq!(DNSClass::IN, record.dns_class());

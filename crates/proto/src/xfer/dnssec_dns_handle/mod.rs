@@ -386,7 +386,8 @@ where
                 debug!("verified: {name} record_type: {record_type}",);
                 (proof, adjusted_ttl)
             }
-            Err(ProofError { proof, kind }) => {
+            Err(error) => {
+                let ProofError { proof, kind } = *error;
                 match kind {
                     ProofErrorKind::DsResponseNsec { .. } => {
                         debug!("verified insecure {name}/{record_type}")
@@ -442,7 +443,7 @@ async fn verify_rrset<H>(
     rrset: Rrset<'_>,
     rrsigs: Vec<RecordRef<'_, RRSIG>>,
     options: DnsRequestOptions,
-) -> Result<(Proof, Option<u32>), ProofError>
+) -> Result<(Proof, Option<u32>), Box<ProofError>>
 where
     H: DnsHandle + Sync + Unpin,
 {
@@ -474,7 +475,7 @@ async fn verify_dnskey_rrset<H>(
     handle: DnssecDnsHandle<H>,
     rrset: &Rrset<'_>,
     options: DnsRequestOptions,
-) -> Result<bool, ProofError>
+) -> Result<bool, Box<ProofError>>
 where
     H: DnsHandle + Sync + Unpin,
 {
@@ -519,10 +520,10 @@ where
 
     if all_unsupported.unwrap_or_default() {
         // cannot validate; mark as insecure
-        return Err(ProofError::new(
+        return Err(Box::new(ProofError::new(
             Proof::Insecure,
             ProofErrorKind::UnsupportedKeyAlgorithm,
-        ));
+        )));
     }
 
     // need to get DS records for each DNSKEY
@@ -584,24 +585,24 @@ where
     if !ds_records.is_empty() {
         // there were DS records, but no DNSKEYs, we're in a bogus state
         trace!("bogus dnskey: {}", rrset.name());
-        Err(ProofError::new(
+        Err(Box::new(ProofError::new(
             Proof::Bogus,
             ProofErrorKind::DsRecordsButNoDnskey {
                 name: rrset.name().clone(),
             },
-        ))
+        )))
     } else {
         // if rrset.records.is_empty() && ds_records.is_empty()
         // there were DS records, but no DNSKEYs, we're in a bogus state
         //   if there was no DS record, it should have gotten an NSEC upstream, and returned early above
         //   and all other cases...
         trace!("no dnskey found: {}", rrset.name());
-        Err(ProofError::new(
+        Err(Box::new(ProofError::new(
             Proof::Indeterminate,
             ProofErrorKind::DnskeyNotFound {
                 name: rrset.name().clone(),
             },
-        ))
+        )))
     }
 }
 
@@ -720,7 +721,7 @@ async fn verify_default_rrset<H>(
     rrset: Rrset<'_>,
     rrsigs: Vec<RecordRef<'_, RRSIG>>,
     options: DnsRequestOptions,
-) -> Result<(Proof, Option<u32>), ProofError>
+) -> Result<(Proof, Option<u32>), Box<ProofError>>
 where
     H: DnsHandle + Sync + Unpin,
 {
@@ -732,20 +733,20 @@ where
         let ds_records = find_ds_records(handle, rrset.name().clone(), options).await?; // insecure will return early here
 
         if !ds_records.is_empty() {
-            return Err(ProofError::new(
+            return Err(Box::new(ProofError::new(
                 Proof::Bogus,
                 ProofErrorKind::DsRecordShouldExist {
                     name: rrset.name().clone(),
                 },
-            ));
+            )));
         } else {
-            return Err(ProofError::new(
+            return Err(Box::new(ProofError::new(
                 Proof::Indeterminate,
                 ProofErrorKind::RrsigsNotPresent {
                     name: rrset.name().clone(),
                     record_type: rrset.record_type(),
                 },
-            ));
+            )));
         }
     }
 
@@ -884,13 +885,13 @@ where
 
     // if there are no available verifications, then we are in a failed state.
     if verifications.is_empty() {
-        return Err(ProofError::new(
+        return Err(Box::new(ProofError::new(
             Proof::Bogus,
             ProofErrorKind::RrsigsNotPresent {
                 name: rrset.name().clone(),
                 record_type: rrset.record_type(),
             },
-        ));
+        )));
     }
 
     // as long as any of the verifications is good, then the RRSET is valid.
@@ -902,7 +903,7 @@ where
 
     proof.ok_or_else(||
         // we are in a bogus state, DS records were available (see beginning of function), but RRSIGs couldn't be verified
-        ProofError::new(Proof::Bogus, ProofErrorKind::RrsigsUnverified{name: rrset.name().clone(), record_type: rrset.record_type()})
+        Box::new(ProofError::new(Proof::Bogus, ProofErrorKind::RrsigsUnverified{name: rrset.name().clone(), record_type: rrset.record_type()}))
     )
 }
 
@@ -913,44 +914,44 @@ fn verify_rrset_with_dnskey(
     rrsig: RecordRef<'_, RRSIG>,
     rrset: &Rrset<'_>,
     current_time: u32,
-) -> Result<(Proof, Option<u32>), ProofError> {
+) -> Result<(Proof, Option<u32>), Box<ProofError>> {
     if dnskey.data().revoke() {
         debug!("revoked");
-        return Err(ProofError::new(
+        return Err(Box::new(ProofError::new(
             Proof::Bogus,
             ProofErrorKind::DnsKeyRevoked {
                 name: dnskey.name().clone(),
                 key_tag: rrsig.data().key_tag(),
             },
-        ));
+        )));
     } // TODO: does this need to be validated? RFC 5011
     if !dnskey.data().zone_key() {
-        return Err(ProofError::new(
+        return Err(Box::new(ProofError::new(
             Proof::Bogus,
             ProofErrorKind::NotZoneDnsKey {
                 name: dnskey.name().clone(),
                 key_tag: rrsig.data().key_tag(),
             },
-        ));
+        )));
     }
     if dnskey.data().algorithm() != rrsig.data().algorithm() {
-        return Err(ProofError::new(
+        return Err(Box::new(ProofError::new(
             Proof::Bogus,
             ProofErrorKind::AlgorithmMismatch {
                 rrsig: rrsig.data().algorithm(),
                 dnskey: dnskey.data().algorithm(),
             },
-        ));
+        )));
     }
 
     let validity = check_rrsig_validity(rrsig, rrset, dnskey, current_time);
     if !matches!(validity, RrsigValidity::ValidRrsig) {
         // TODO better error handling when the error payload is not immediately discarded by
         // the caller
-        return Err(ProofError::new(
+        return Err(Box::new(ProofError::new(
             Proof::Bogus,
             ProofErrorKind::Msg(format!("{:?}", validity)),
-        ));
+        )));
     }
 
     dnskey
@@ -982,14 +983,14 @@ fn verify_rrset_with_dnskey(
                 dnskey.name(),
                 dnskey.data()
             );
-            ProofError::new(
+            Box::new(ProofError::new(
                 Proof::Bogus,
                 ProofErrorKind::DnsKeyVerifyRrsig {
                     name: dnskey.name().clone(),
                     key_tag: rrsig.data().key_tag(),
                     error: e,
                 },
-            )
+            ))
         })
 }
 
@@ -1149,7 +1150,7 @@ pub fn verify_nsec(query: &Query, soa_name: &Name, nsecs: &[&Record]) -> Proof {
             .data()
             .as_dnssec()
             .and_then(DNSSECRData::as_nsec)
-            .map_or(false, |rdata| {
+            .is_some_and(|rdata| {
                 // this should not be in the covered list
                 !rdata.type_bit_maps().contains(&query.query_type())
             })
@@ -1167,7 +1168,7 @@ pub fn verify_nsec(query: &Query, soa_name: &Name, nsecs: &[&Record]) -> Proof {
                 nsec.data()
                     .as_dnssec()
                     .and_then(DNSSECRData::as_nsec)
-                    .map_or(false, |rdata| {
+                    .is_some_and(|rdata| {
                         // the query name is less than the next name
                         // or this record wraps the end, i.e. is the last record
                         name < rdata.next_domain_name() || rdata.next_domain_name() < nsec.name()
@@ -1300,3 +1301,95 @@ const MAX_KEY_TAG_COLLISIONS: usize = 2;
 
 /// The maximum number of RRSIGs to attempt to validate for each RRSET.
 const MAX_RRSIGS_PER_RRSET: usize = 8;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rr::rdata::A;
+
+    #[test]
+    fn rejected_dnskeys_preserve_proof_and_error_details() {
+        let name = Name::from_ascii("example.test.").unwrap();
+        let record = Record::from_rdata(name.clone(), 60, RData::A(A::new(192, 0, 2, 1)));
+        let rrset = Rrset::new(&record);
+
+        for (zone_key, revoke, algorithm, current_time) in [
+            (true, true, Algorithm::RSASHA256, 50),
+            (false, false, Algorithm::RSASHA256, 50),
+            (true, false, Algorithm::ED25519, 50),
+            (true, false, Algorithm::RSASHA256, 101),
+            (true, false, Algorithm::RSASHA256, 50),
+        ] {
+            // Empty key material must reach the cryptographic rejection path only after
+            // the flag, algorithm, and signature-validity checks have passed.
+            let key = DNSKEY::new(zone_key, false, revoke, algorithm, Vec::new());
+            let key_tag = key.calculate_key_tag().unwrap();
+            let dnskey = Record::from_rdata(name.clone(), 60, key).into_record_of_rdata();
+            let rrsig = Record::from_rdata(
+                name.clone(),
+                60,
+                RRSIG::new(
+                    RecordType::A,
+                    Algorithm::RSASHA256,
+                    name.num_labels(),
+                    60,
+                    100,
+                    0,
+                    key_tag,
+                    name.clone(),
+                    Vec::new(),
+                ),
+            )
+            .into_record_of_rdata();
+            let error = verify_rrset_with_dnskey(
+                dnskey.try_borrow().unwrap(),
+                rrsig.try_borrow().unwrap(),
+                &rrset,
+                current_time,
+            )
+            .unwrap_err();
+
+            assert_eq!(error.proof, Proof::Bogus);
+            match &error.kind {
+                ProofErrorKind::DnsKeyRevoked {
+                    name: actual,
+                    key_tag: actual_tag,
+                } => {
+                    assert!(revoke);
+                    assert_eq!(actual, &name);
+                    assert_eq!(*actual_tag, key_tag);
+                }
+                ProofErrorKind::NotZoneDnsKey {
+                    name: actual,
+                    key_tag: actual_tag,
+                } => {
+                    assert!(!zone_key && !revoke);
+                    assert_eq!(actual, &name);
+                    assert_eq!(*actual_tag, key_tag);
+                }
+                ProofErrorKind::AlgorithmMismatch { rrsig, dnskey } => {
+                    assert_eq!(algorithm, Algorithm::ED25519);
+                    assert_eq!(*rrsig, Algorithm::RSASHA256);
+                    assert_eq!(*dnskey, algorithm);
+                }
+                ProofErrorKind::Msg(message) => {
+                    assert_eq!(current_time, 101);
+                    assert_eq!(message, "ExpiredRrsig");
+                }
+                ProofErrorKind::DnsKeyVerifyRrsig {
+                    name: actual,
+                    key_tag: actual_tag,
+                    error,
+                } => {
+                    assert!(zone_key && !revoke);
+                    assert_eq!(algorithm, Algorithm::RSASHA256);
+                    assert_eq!(current_time, 50);
+                    assert_eq!(actual, &name);
+                    assert_eq!(*actual_tag, key_tag);
+                    assert!(!error.to_string().is_empty());
+                }
+                kind => panic!("unexpected rejection: {kind:?}"),
+            }
+        }
+    }
+}

@@ -33,9 +33,9 @@ impl RecordSet {
     ///
     /// * `name` - The label for the `RecordSet`
     /// * `record_type` - `RecordType` of this `RecordSet`, all records in the `RecordSet` must be of the
-    ///                   specified `RecordType`.
+    ///   specified `RecordType`.
     /// * `serial` - current serial number of the `SOA` record, this is to be used for `IXFR` and
-    ///              signing for DNSSEC after updates.
+    ///   signing for DNSSEC after updates.
     ///
     /// # Return value
     ///
@@ -59,7 +59,7 @@ impl RecordSet {
     ///
     /// * `name` - The label for the `RecordSet`
     /// * `record_type` - `RecordType` of this `RecordSet`, all records in the `RecordSet` must be of the
-    ///                   specified `RecordType`.
+    ///   specified `RecordType`.
     /// * `ttl` - time-to-live for the `RecordSet` in seconds.
     ///
     /// # Return value
@@ -133,7 +133,7 @@ impl RecordSet {
     ///
     /// * `and_rrsigs` - if true, RRSIGs will be returned if they exist
     /// * `supported_algorithms` - the RRSIGs will be filtered by the set of supported_algorithms,
-    ///                            and then only the maximal RRSIG algorithm will be returned.
+    ///   and then only the maximal RRSIG algorithm will be returned.
     #[cfg(feature = "dnssec")]
     pub fn records(
         &self,
@@ -152,7 +152,7 @@ impl RecordSet {
     /// # Arguments
     ///
     /// * `supported_algorithms` - the RRSIGs will be filtered by the set of supported_algorithms,
-    ///                            and then only the maximal RRSIG algorithm will be returned.
+    ///   and then only the maximal RRSIG algorithm will be returned.
     #[cfg(feature = "dnssec")]
     pub fn records_with_rrsigs(
         &self,
@@ -265,8 +265,8 @@ impl RecordSet {
     ///
     /// * `record` - `Record` asserts that the `name` and `record_type` match the `RecordSet`.
     /// * `serial` - current serial number of the `SOA` record, this is to be used for `IXFR` and
-    ///              signing for DNSSEC after updates. The serial will only be updated if the
-    ///              record was added.
+    ///   signing for DNSSEC after updates. The serial will only be updated if the
+    ///   record was added.
     ///
     /// # Return value
     ///
@@ -386,10 +386,10 @@ impl RecordSet {
     /// # Arguments
     ///
     /// * `record` - `Record` asserts that the `name` and `record_type` match the `RecordSet`. Removes
-    ///              any `record` if the record data, `RData`, match.
+    ///   any `record` if the record data, `RData`, match.
     /// * `serial` - current serial number of the `SOA` record, this is to be used for `IXFR` and
-    ///              signing for DNSSEC after updates. The serial will only be updated if the
-    ///              record was added.
+    ///   signing for DNSSEC after updates. The serial will only be updated if the
+    ///   record was added.
     ///
     /// # Return value
     ///
