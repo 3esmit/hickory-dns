@@ -5,6 +5,10 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 All notes should be prepended with the location of the change, e.g. `(proto)` or `(resolver)`.
 
+## Unreleased
+
+* (proto) Reject cross-zone NSEC3 closest-encloser candidates before walking ancestor names, preventing unbounded allocation (RUSTSEC-2026-0118). Preserve valid root-zone enumeration in debug builds.
+
 ## 0.25.0-alpha.4
 
 * ci: stop blocking on the platform matrix jobs by @djc in https://github.com/hickory-dns/hickory-dns/pull/2563
