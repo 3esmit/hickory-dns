@@ -467,7 +467,7 @@ impl<'a> Parser<'a> {
         }
 
         let (mut state, mut value) = (None, 0_u32);
-        for (i, c) in ttl_str.chars().enumerate() {
+        for (i, c) in ttl_str.char_indices() {
             let start = match (state, c) {
                 (None, '0'..='9') => {
                     state = Some(i);
@@ -478,7 +478,7 @@ impl<'a> Parser<'a> {
                 _ => return Err(ParseErrorKind::ParseTime(ttl_str.to_string()).into()),
             };
 
-            // All allowed chars are ASCII, so using char indexes to slice &[u8] is OK
+            // `char_indices` yields byte offsets, which are valid string-slice boundaries.
             let number = u32::from_str(&ttl_str[start..i])
                 .map_err(|_| ParseErrorKind::ParseTime(ttl_str.to_string()))?;
 
@@ -500,7 +500,7 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(start) = state {
-            // All allowed chars are ASCII, so using char indexes to slice &[u8] is OK
+            // `char_indices` yields byte offsets, which are valid string-slice boundaries.
             let number = u32::from_str(&ttl_str[start..])
                 .map_err(|_| ParseErrorKind::ParseTime(ttl_str.to_string()))?;
             value = value
@@ -549,5 +549,12 @@ mod tests {
             "unexpected success: {:#?}",
             result
         );
+    }
+
+    #[test]
+    fn parse_time_rejects_non_ascii_input_without_panicking() {
+        for value in ["µ", "1µ", "1µs", "1😀2s"] {
+            assert!(Parser::parse_time(value).is_err(), "input: {value}");
+        }
     }
 }
