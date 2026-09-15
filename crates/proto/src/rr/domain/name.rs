@@ -649,6 +649,7 @@ impl Name {
         encoder: &mut BinEncoder<'_>,
         canonical: bool,
     ) -> ProtoResult<()> {
+        let compression = !canonical && encoder.compressed_name_count < COMPRESSED_NAME_LIMIT;
         let buf_len = encoder.len(); // lazily assert the size is less than 255...
                                      // lookup the label in the BinEncoder
                                      // if it exists, write the Pointer
@@ -669,26 +670,33 @@ impl Name {
         let last_index = encoder.offset();
         // now search for other labels already stored matching from the beginning label, strip then to the end
         //   if it's not found, then store this as a new label
-        for label_idx in &labels_written {
-            match encoder.get_label_pointer(*label_idx, last_index) {
-                // if writing canonical and already found, continue
-                Some(_) if canonical => continue,
-                Some(loc) if !canonical => {
-                    // reset back to the beginning of this label, and then write the pointer...
-                    encoder.set_offset(*label_idx);
-                    encoder.trim();
+        if compression {
+            encoder.compressed_name_count += 1;
+            for label_idx in &labels_written {
+                match encoder.get_label_pointer(*label_idx, last_index) {
+                    Some(loc) => {
+                        // reset back to the beginning of this label, and then write the pointer...
+                        encoder.set_offset(*label_idx);
+                        encoder.trim();
 
-                    // write out the pointer marker
-                    //  or'd with the location which shouldn't be larger than this 2^14 or 16k
-                    encoder.emit_u16(0xC000u16 | (loc & 0x3FFFu16))?;
+                        // write out the pointer marker
+                        //  or'd with the location which shouldn't be larger than this 2^14 or 16k
+                        encoder.emit_u16(0xC000u16 | (loc & 0x3FFFu16))?;
 
-                    // we found a pointer don't write more, break
-                    return Ok(());
+                        // we found a pointer don't write more, break
+                        return Ok(());
+                    }
+                    None => {
+                        // no existing label exists, store this new one.
+                        encoder.store_label_pointer(*label_idx, last_index);
+                    }
                 }
-                _ => {
-                    // no existing label exists, store this new one.
-                    encoder.store_label_pointer(*label_idx, last_index);
-                }
+            }
+        } else {
+            // Avoid searching when compression is disabled, but retain candidates
+            // for later names whose record type permits compression.
+            for label_idx in &labels_written {
+                encoder.store_label_pointer(*label_idx, last_index);
             }
         }
 
@@ -1414,6 +1422,10 @@ impl<'de> Deserialize<'de> for Name {
         FromStr::from_str(&s).map_err(de::Error::custom)
     }
 }
+
+/// Maximum number of names for which compression is attempted per message.
+/// Matches the limit used by the upstream security fix and Unbound.
+const COMPRESSED_NAME_LIMIT: usize = 120;
 
 #[cfg(test)]
 mod tests {

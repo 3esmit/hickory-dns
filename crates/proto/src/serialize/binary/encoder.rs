@@ -97,6 +97,8 @@ pub struct BinEncoder<'a> {
     name_pointers: Vec<(usize, Vec<u8>)>,
     mode: EncodeMode,
     canonical_names: bool,
+    /// Number of names encoded with compression enabled.
+    pub(crate) compressed_name_count: usize,
 }
 
 impl<'a> BinEncoder<'a> {
@@ -136,6 +138,7 @@ impl<'a> BinEncoder<'a> {
             name_pointers: Vec::new(),
             mode,
             canonical_names: false,
+            compressed_name_count: 0,
         }
     }
 
@@ -243,7 +246,7 @@ impl<'a> BinEncoder<'a> {
         assert!(start <= (u16::MAX as usize));
         assert!(end <= (u16::MAX as usize));
         assert!(start <= end);
-        if self.offset < 0x3FFF_usize {
+        if self.offset < 0x3FFF_usize && self.name_pointers.len() < COMPRESSION_CANDIDATE_LIMIT {
             self.name_pointers
                 .push((start, self.slice_of(start, end).to_vec())); // the next char will be at the len() location
         }
@@ -489,6 +492,10 @@ pub enum EncodeMode {
     Normal,
 }
 
+/// Maximum number of label pointers retained for name compression searches.
+/// Together with the compressed-name limit, this bounds work for large messages.
+const COMPRESSION_CANDIDATE_LIMIT: usize = 64;
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -503,6 +510,67 @@ mod tests {
         serialize::binary::BinDecodable,
     };
     use crate::{rr::Name, serialize::binary::BinDecoder};
+
+    #[test]
+    fn test_compression_candidate_bound() -> ProtoResult<()> {
+        let mut bytes = Vec::new();
+        let mut encoder = BinEncoder::new(&mut bytes);
+        // Distinct single-label names prevent suffix matches from hiding growth.
+        for index in 0..200 {
+            Name::from_ascii(format!("name{index}."))?.emit(&mut encoder)?;
+            assert!(encoder.name_pointers.len() <= 64);
+        }
+        assert_eq!(encoder.name_pointers.len(), 64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_compression_name_bound_round_trip() -> ProtoResult<()> {
+        let name = Name::from_ascii("www.example.com.")?;
+        let uncompressed = name.to_bytes()?;
+        let mut bytes = Vec::new();
+        let mut encoder = BinEncoder::new(&mut bytes);
+        for index in 0..240 {
+            let start = encoder.offset();
+            name.emit(&mut encoder)?;
+            let wire = encoder.slice_of(start, encoder.offset());
+            if index == 0 || index >= 120 {
+                assert_eq!(wire, uncompressed);
+            } else {
+                assert_eq!(wire, [0xc0, 0]);
+            }
+        }
+        let mut decoder = BinDecoder::new(encoder.into_bytes());
+        for _ in 0..240 {
+            assert_eq!(Name::read(&mut decoder)?, name);
+        }
+        assert!(decoder.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_canonical_names_preserve_compression_budget() -> ProtoResult<()> {
+        let name = Name::from_ascii("www.example.com.")?;
+        let uncompressed = name.to_bytes()?;
+        let mut bytes = Vec::new();
+        let mut encoder = BinEncoder::new(&mut bytes);
+        for _ in 0..130 {
+            let start = encoder.offset();
+            name.emit_as_canonical(&mut encoder, true)?;
+            assert_eq!(encoder.slice_of(start, encoder.offset()), uncompressed);
+        }
+        for index in 0..121 {
+            let start = encoder.offset();
+            name.emit(&mut encoder)?;
+            let wire = encoder.slice_of(start, encoder.offset());
+            if index < 120 {
+                assert_eq!(wire, [0xc0, 0]);
+            } else {
+                assert_eq!(wire, uncompressed);
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_label_compression_regression() {

@@ -8,6 +8,7 @@ All notes should be prepended with the location of the change, e.g. `(proto)` or
 ## Unreleased
 
 * (proto) Reject cross-zone NSEC3 closest-encloser candidates before walking ancestor names, preventing unbounded allocation (RUSTSEC-2026-0118). Preserve valid root-zone enumeration in debug builds.
+* (proto) Bound DNS name compression to 64 stored label candidates and 120 names per message, backporting the upstream mitigation for RUSTSEC-2026-0119. Further names remain valid but are emitted without compression. Canonical encoding does not search for compression matches.
 
 ## 0.25.0-alpha.4
 
