@@ -1027,7 +1027,23 @@ pub mod not_ring {
     use std;
 
     #[derive(Clone, Copy, Debug)]
+    #[allow(dead_code)]
+    pub struct KeyRejected;
+
+    #[derive(Clone, Copy, Debug)]
     pub struct Unspecified;
+
+    impl std::fmt::Display for KeyRejected {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            Ok(())
+        }
+    }
+
+    impl std::error::Error for KeyRejected {
+        fn description(&self) -> &str {
+            "ring feature not enabled"
+        }
+    }
 
     impl std::fmt::Display for Unspecified {
         fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
