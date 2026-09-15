@@ -27,9 +27,12 @@ pub(crate) fn parse<'i, I: Iterator<Item = &'i str>>(mut tokens: I) -> ParseResu
         "OPENPGPKEY public key field is missing",
     ))?;
     let public_key = data_encoding::BASE64.decode(encoded_public_key.as_bytes())?;
-    Some(OPENPGPKEY::new(public_key))
-        .filter(|_| tokens.next().is_none())
-        .ok_or_else(|| ParseErrorKind::Message("too many fields for OPENPGPKEY").into())
+    let public_key = OPENPGPKEY::new(public_key);
+    if tokens.next().is_none() {
+        Ok(public_key)
+    } else {
+        Err(ParseErrorKind::Message("too many fields for OPENPGPKEY").into())
+    }
 }
 
 #[test]

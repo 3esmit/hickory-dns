@@ -92,7 +92,7 @@ impl<P: RuntimeProvider> UdpStream<P> {
     ///
     /// * `remote_addr` - socket address for the remote connection (used to determine IPv4 or IPv6)
     /// * `bind_addr` - optional local socket address to connect from (if a nonzero port number is
-    ///                 specified, it will be used instead of randomly selecting a port)
+    ///   specified, it will be used instead of randomly selecting a port)
     /// * `provider` - async runtime provider, for I/O and timers
     ///
     /// # Return

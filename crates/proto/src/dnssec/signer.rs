@@ -674,7 +674,7 @@ mod tests {
             ),
         );
 
-        let rrset = vec![
+        let rrset = [
             Record::from_rdata(
                 origin.clone(),
                 86400,
@@ -797,7 +797,7 @@ MC0CAQACBQC+L6pNAgMBAAECBQCYj0ZNAgMA9CsCAwDHZwICeEUCAnE/AgMA3u0=
                     vec![],
                 ),
             );
-            let rrset = vec![
+            let rrset = [
                 Record::from_rdata(
                     origin.clone(),
                     86400,
@@ -817,7 +817,7 @@ MC0CAQACBQC+L6pNAgMBAAECBQCYj0ZNAgMA9CsCAwDHZwICeEUCAnE/AgMA3u0=
             let tbs = TBS::from_rrsig(&rrsig, rrset.iter()).unwrap();
             assert!(!tbs.as_ref().is_empty());
 
-            let rrset = vec![
+            let rrset = [
                 Record::from_rdata(
                     origin.clone(),
                     86400,
