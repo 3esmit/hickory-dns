@@ -5,6 +5,10 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 All notes should be prepended with the location of the change, e.g. `(proto)` or `(resolver)`.
 
+## Unreleased
+
+* (proto) Bound DNS name compression to 64 stored label candidates and 120 names per message, backporting the upstream mitigation for RUSTSEC-2026-0119. Further names remain valid but are emitted without compression. Canonical encoding does not search for compression matches.
+
 ## 0.25.0-alpha.4
 
 * ci: stop blocking on the platform matrix jobs by @djc in https://github.com/hickory-dns/hickory-dns/pull/2563
