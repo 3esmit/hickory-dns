@@ -301,7 +301,8 @@ impl Iterator for TableMutator<'_> {
                     self.nested_array_mutator = None;
                 }
             }
-            if let Some(key) = self.key_iter.next() {
+            {
+                let key = self.key_iter.next()?;
                 match self.original.get(key).unwrap() {
                     Value::String(_)
                     | Value::Integer(_)
@@ -315,8 +316,6 @@ impl Iterator for TableMutator<'_> {
                         self.nested_table_mutator = Some((key, Box::new(TableMutator::new(table))));
                     }
                 }
-            } else {
-                return None;
             }
         }
     }
@@ -365,7 +364,8 @@ impl Iterator for ArrayMutator<'_> {
                     self.nested_array_mutator = None;
                 }
             }
-            if let Some(index) = self.index_iter.next() {
+            {
+                let index = self.index_iter.next()?;
                 match self.original.get(index).unwrap() {
                     Value::String(_)
                     | Value::Integer(_)
@@ -381,8 +381,6 @@ impl Iterator for ArrayMutator<'_> {
                             Some((index, Box::new(TableMutator::new(table))));
                     }
                 }
-            } else {
-                return None;
             }
         }
     }

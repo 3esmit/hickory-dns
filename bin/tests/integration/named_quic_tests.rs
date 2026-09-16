@@ -8,12 +8,10 @@
 #![cfg(not(windows))]
 #![cfg(feature = "dns-over-quic")]
 
-use std::{env, fs::File, io::*, net::*, sync::Arc};
-
-use rustls::{pki_types::CertificateDer, ClientConfig, RootCertStore};
+use std::net::*;
 use tokio::runtime::Runtime;
 
-use crate::server_harness::{named_test_harness, query_a};
+use crate::server_harness::{fixture::TlsConfig, query_a_with_background};
 use hickory_client::client::Client;
 use hickory_proto::quic::QuicClientStream;
 use hickory_proto::xfer::Protocol;
@@ -23,34 +21,13 @@ use test_support::subscribe;
 fn test_example_quic_toml_startup() {
     subscribe();
 
-    named_test_harness("dns_over_quic.toml", move |socket_ports| {
-        let mut cert_der = vec![];
+    let fixture = TlsConfig::new("dns_over_quic.toml");
+    fixture.run(|socket_ports| {
+        let client_config = fixture.client_config();
         let quic_port = socket_ports.get_v4(Protocol::Quic);
-        let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "..".to_owned());
-        println!("using server src path: {server_path} and quic_port: {quic_port:?}");
-
-        File::open(format!(
-            "{server_path}/tests/test-data/test_configs/sec/example.cert"
-        ))
-        .expect("failed to open cert")
-        .read_to_end(&mut cert_der)
-        .expect("failed to read cert");
 
         let mut io_loop = Runtime::new().unwrap();
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, quic_port.expect("no quic_port")));
-        std::thread::sleep(std::time::Duration::from_secs(1));
-
-        // using the mozilla default root store
-        let mut root_store = RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        root_store.add(CertificateDer::from(cert_der)).unwrap();
-
-        let client_config =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_root_certificates(root_store)
-                .with_no_client_auth();
 
         let mut quic_builder = QuicClientStream::builder();
         quic_builder.crypto_config(client_config);
@@ -60,11 +37,6 @@ fn test_example_quic_toml_startup() {
 
         // ipv4 should succeed
         let (mut client, bg) = io_loop.block_on(client).expect("client failed to connect");
-        hickory_proto::runtime::spawn_bg(&io_loop, bg);
-
-        query_a(&mut io_loop, &mut client);
-
-        // a second request should work...
-        query_a(&mut io_loop, &mut client);
+        query_a_with_background(&mut io_loop, &mut client, bg, true);
     })
 }

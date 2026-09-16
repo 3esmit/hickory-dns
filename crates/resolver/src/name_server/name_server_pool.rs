@@ -231,12 +231,12 @@ where
                     debug!("error from UDP, retrying over TCP: {}", e);
                     Err(e)
                 }
-                result => return result.map_err(ProtoError::from),
+                result => return result,
             };
 
             if stream_conns.is_empty() {
                 debug!("no TCP connections available");
-                return udp_res.map_err(ProtoError::from);
+                return udp_res;
             }
 
             // Try query over TCP, as response to query over UDP was either truncated or was an
@@ -244,7 +244,7 @@ where
             let tcp_res = Self::try_send(opts, stream_conns, tcp_message, &stream_index).await;
 
             let tcp_err = match tcp_res {
-                res @ Ok(..) => return res.map_err(ProtoError::from),
+                res @ Ok(..) => return res,
                 Err(e) => e,
             };
 
@@ -328,14 +328,14 @@ where
             .map(move |conn| {
                 conn.send(request_cont.clone())
                     .first_answer()
-                    .map(|result| result.map_err(|e| (conn, e)))
+                    .map(|result| result.map_err(|e| Box::new((conn, e))))
             })
             .collect::<FuturesUnordered<_>>();
 
         while let Some(result) = requests.next().await {
             let (conn, e) = match result {
                 Ok(sent) => return Ok(sent),
-                Err((conn, e)) => (conn, e),
+                Err(error) => *error,
             };
 
             match e.kind() {
@@ -414,8 +414,8 @@ impl Stream for Local {
 #[cfg(test)]
 #[cfg(feature = "tokio-runtime")]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-    use std::str::FromStr;
+    use std::future;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use tokio::runtime::Runtime;
 
@@ -427,6 +427,87 @@ mod tests {
     use crate::proto::rr::{Name, RecordType};
     use crate::proto::runtime::TokioRuntimeProvider;
     use crate::proto::xfer::{DnsHandle, DnsRequestOptions, Protocol};
+
+    #[derive(Clone)]
+    struct MockConnectionProvider(crate::lookup_ip::tests::MockDnsHandle);
+
+    impl ConnectionProvider for MockConnectionProvider {
+        type Conn = crate::lookup_ip::tests::MockDnsHandle;
+        type FutureConn = future::Ready<Result<Self::Conn, ProtoError>>;
+        type RuntimeProvider = TokioRuntimeProvider;
+
+        fn new_connection(
+            &self,
+            _: &NameServerConfig,
+            _: &ResolverOpts,
+        ) -> Result<Self::FutureConn, std::io::Error> {
+            Ok(future::ready(Ok(self.0.clone())))
+        }
+    }
+
+    fn mock_server(
+        messages: Vec<Result<DnsResponse, ProtoError>>,
+    ) -> NameServer<MockConnectionProvider> {
+        NameServer::new(
+            NameServerConfig::new(([127, 0, 0, 1], 53).into(), Protocol::Udp),
+            ResolverOpts::default(),
+            MockConnectionProvider(crate::lookup_ip::tests::mock(messages)),
+        )
+    }
+
+    fn mock_request() -> DnsRequest {
+        let mut message = crate::proto::op::Message::new();
+        message.add_query(Query::query(Name::root(), RecordType::A));
+        message.into()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_parallel_busy_connection_is_retried() {
+        let expected = crate::lookup_ip::tests::v4_message().unwrap();
+        // The existing mock consumes responses from the end of the vector.
+        let server = mock_server(vec![Ok(expected.clone()), Err(ProtoErrorKind::Busy.into())]);
+        let started = tokio::time::Instant::now();
+        let response = parallel_conn_loop(vec![server], mock_request(), ResolverOpts::default())
+            .await
+            .unwrap();
+        assert_eq!(response.answers(), expected.answers());
+        assert_eq!(started.elapsed(), Duration::from_millis(20));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_parallel_failed_connection_preserves_fallback() {
+        let expected = crate::lookup_ip::tests::v4_message().unwrap();
+        let servers = vec![
+            mock_server(vec![Err(ProtoErrorKind::Timeout.into())]),
+            mock_server(vec![Ok(expected.clone())]),
+        ];
+        let options = ResolverOpts {
+            num_concurrent_reqs: 1,
+            shuffle_dns_servers: false,
+            ..ResolverOpts::default()
+        };
+        let started = tokio::time::Instant::now();
+        let response = parallel_conn_loop(servers, mock_request(), options)
+            .await
+            .unwrap();
+        assert_eq!(response.answers(), expected.answers());
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_parallel_busy_backoff_remains_bounded() {
+        let messages = (0..5).map(|_| Err(ProtoErrorKind::Busy.into())).collect();
+        let started = tokio::time::Instant::now();
+        let error = parallel_conn_loop(
+            vec![mock_server(messages)],
+            mock_request(),
+            ResolverOpts::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.is_no_connections());
+        assert_eq!(started.elapsed(), Duration::from_millis(300));
+    }
 
     #[ignore]
     // because of there is a real connection that needs a reasonable timeout
@@ -502,13 +583,63 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_multi_use_conns() {
-        let io_loop = Runtime::new().unwrap();
-        let conn_provider = TokioConnectionProvider::default();
+    #[tokio::test]
+    async fn test_multi_use_conns() {
+        use crate::proto::{
+            op::{Message, MessageType, ResponseCode},
+            rr::{
+                rdata::{A, AAAA},
+                RData, Record,
+            },
+        };
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let name = Name::from_ascii("www.example.test.").unwrap();
+        let records = [
+            Record::from_rdata(name.clone(), 60, RData::A(A::new(192, 0, 2, 1))),
+            Record::from_rdata(
+                name.clone(),
+                60,
+                RData::AAAA(AAAA::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            ),
+        ];
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let server = async {
+            // Accept exactly one connection: both record types must use it.
+            let (mut socket, _) = listener.accept().await.unwrap();
+            for record in &records {
+                let length = usize::from(socket.read_u16().await.unwrap());
+                assert!(length <= 4096);
+                let mut bytes = vec![0; length];
+                socket.read_exact(&mut bytes).await.unwrap();
+                let request = Message::from_vec(&bytes).unwrap();
+                let query = Query::query(name.clone(), record.record_type());
+                assert_eq!(request.message_type(), MessageType::Query);
+                assert_eq!(request.queries(), std::slice::from_ref(&query));
+                let mut response = Message::new();
+                response
+                    .set_id(request.id())
+                    .set_message_type(MessageType::Response)
+                    .set_response_code(ResponseCode::NoError)
+                    .add_query(query)
+                    .add_answer(record.clone());
+                let bytes = response.to_vec().unwrap();
+                socket
+                    .write_u16(bytes.len().try_into().unwrap())
+                    .await
+                    .unwrap();
+                socket.write_all(&bytes).await.unwrap();
+            }
+            finished.await.unwrap();
+        };
 
         let tcp = NameServerConfig {
-            socket_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53),
+            socket_addr: address,
             protocol: Protocol::Tcp,
             tls_dns_name: None,
             http_endpoint: None,
@@ -517,70 +648,42 @@ mod tests {
             tls_config: None,
             bind_addr: None,
         };
-
         let opts = ResolverOpts {
             try_tcp_on_error: true,
             ..ResolverOpts::default()
         };
-        let ns_config = { tcp };
-        let name_server = GenericNameServer::new(ns_config, opts.clone(), conn_provider);
+        let name_server =
+            GenericNameServer::new(tcp, opts.clone(), TokioConnectionProvider::default());
         let name_servers: Arc<[_]> = Arc::from([name_server]);
-
         let pool = GenericNameServerPool::from_nameservers_test(
             opts,
             Arc::from([]),
             Arc::clone(&name_servers),
         );
-
-        let name = Name::from_str("www.example.com.").unwrap();
-
-        // first lookup
-        let response = io_loop
-            .block_on(
-                pool.lookup(
-                    Query::query(name.clone(), RecordType::A),
-                    DnsRequestOptions::default(),
-                )
-                .first_answer(),
-            )
-            .expect("lookup failed");
-
-        assert_eq!(
-            *response.answers()[0]
-                .data()
-                .as_a()
-                .expect("no a record available"),
-            Ipv4Addr::new(93, 184, 215, 14).into()
-        );
-
-        assert!(
-            name_servers[0].is_connected(),
-            "if this is failing then the NameServers aren't being properly shared."
-        );
-
-        // first lookup
-        let response = io_loop
-            .block_on(
-                pool.lookup(
-                    Query::query(name, RecordType::AAAA),
-                    DnsRequestOptions::default(),
-                )
-                .first_answer(),
-            )
-            .expect("lookup failed");
-
-        assert_eq!(
-            *response.answers()[0]
-                .data()
-                .as_aaaa()
-                .expect("no aaaa record available"),
-            Ipv6Addr::new(0x2606, 0x2800, 0x21f, 0xcb07, 0x6820, 0x80da, 0xaf6b, 0x8b2c).into()
-        );
-
-        assert!(
-            name_servers[0].is_connected(),
-            "if this is failing then the NameServers aren't being properly shared."
-        );
+        assert!(!name_servers[0].is_connected());
+        let client = async {
+            for record in &records {
+                let query = Query::query(name.clone(), record.record_type());
+                let response = pool
+                    .lookup(query.clone(), DnsRequestOptions::default())
+                    .first_answer()
+                    .await
+                    .expect("lookup failed");
+                assert_eq!(response.response_code(), ResponseCode::NoError);
+                assert_eq!(response.queries(), &[query]);
+                assert_eq!(response.answers(), std::slice::from_ref(record));
+                assert!(
+                    name_servers[0].is_connected(),
+                    "NameServer connection state must be shared with the pool"
+                );
+            }
+            done.send(()).unwrap();
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(server, client);
+        })
+        .await
+        .expect("local connection reuse timeout");
     }
 
     impl GenericNameServerPool<TokioRuntimeProvider> {

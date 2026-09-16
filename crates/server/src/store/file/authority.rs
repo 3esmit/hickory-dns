@@ -44,7 +44,7 @@ impl FileAuthority {
     /// # Arguments
     ///
     /// * `origin` - The zone `Name` being created, this should match that of the `RecordType::SOA`
-    ///              record.
+    ///   record.
     /// * `records` - The map of the initial set of records in the zone.
     /// * `zone_type` - The type of zone, i.e. is this authoritative?
     /// * `allow_axfr` - Whether AXFR is allowed.
@@ -88,7 +88,7 @@ impl FileAuthority {
         // TODO: this should really use something to read line by line or some other method to
         //  keep the usage down. and be a custom lexer...
         let buf = fs::read_to_string(&zone_path)
-            .map_err(|e| format!("failed to read {}: {:?}", &config.zone_file_path, e))?;
+            .map_err(|e| format!("failed to read {}: {:?}", config.zone_file_path, e))?;
 
         let (origin, records) = Parser::new(buf, Some(zone_path), Some(origin))
             .parse()

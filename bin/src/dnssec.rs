@@ -302,12 +302,15 @@ fn load_key(zone_name: Name, key_config: &KeyConfig) -> Result<SigSigner, String
     ))
 }
 
+#[cfg(all(feature = "dns-over-openssl", not(feature = "dns-over-rustls")))]
+type CertificateAndKey = ((X509, Option<Stack<X509>>), PKey<Private>);
+
 /// Load a Certificate from the path (with openssl)
 #[cfg(all(feature = "dns-over-openssl", not(feature = "dns-over-rustls")))]
 pub fn load_cert(
     zone_dir: &Path,
     tls_cert_config: &TlsCertConfig,
-) -> Result<((X509, Option<Stack<X509>>), PKey<Private>), String> {
+) -> Result<CertificateAndKey, String> {
     use tracing::{info, warn};
 
     use hickory_proto::openssl::tls_server::{
@@ -355,9 +358,7 @@ pub fn load_cert(
             read_key_from_der(&private_key_path)?
         }
         (None, _) => {
-            return Err(format!(
-                "No private key associated with specified certificate"
-            ));
+            return Err("No private key associated with specified certificate".to_string());
         }
     };
 

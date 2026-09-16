@@ -27,6 +27,14 @@ use crate::proto::rr::domain::usage::ONION;
 use crate::proto::rr::{IntoName, Name, RData, Record, RecordType};
 use crate::proto::xfer::{DnsRequestOptions, RetryDnsHandle};
 
+#[cfg(all(
+    test,
+    feature = "tokio-runtime",
+    any(feature = "dnssec-ring", feature = "dnssec-openssl")
+))]
+#[path = "resolver_dnssec_tests.rs"]
+mod dnssec_tests;
+
 /// An asynchronous resolver for DNS generic over async Runtimes.
 ///
 /// The lookup methods on `AsyncResolver` spawn background tasks to perform
@@ -418,12 +426,21 @@ impl<P: ConnectionProvider> fmt::Debug for Resolver<P> {
 pub mod testing {
     use std::{net::*, str::FromStr};
 
-    use crate::config::{LookupIpStrategy, NameServerConfig, ResolverConfig, ResolverOpts};
+    use crate::config::{LookupIpStrategy, ResolveHosts, ResolverConfig, ResolverOpts};
+    use crate::local_dns::LocalDns;
     use crate::name_server::ConnectionProvider;
-    use crate::proto::{rr::Name, runtime::Executor};
+    use crate::proto::{
+        rr::{
+            rdata::{A, AAAA},
+            Name, RData,
+        },
+        runtime::Executor,
+    };
     use crate::Resolver;
 
-    /// Test IP lookup from URLs.
+    /// Test IP lookup against a supplied server returning the example address fixture.
+    ///
+    /// For self-contained runtime checks, use [`lookup_ipv4_test`] and [`lookup_ipv6_test`].
     pub fn lookup_test<E: Executor, R: ConnectionProvider>(
         config: ResolverConfig,
         mut exec: E,
@@ -448,6 +465,52 @@ pub mod testing {
                 );
             }
         }
+    }
+
+    /// Test an IPv4 answer and cache reuse against a local UDP server.
+    pub fn lookup_ipv4_test<E: Executor, R: ConnectionProvider>(exec: E, handle: R) {
+        local_lookup_test(false, exec, handle);
+    }
+
+    /// Test an IPv6 answer and cache reuse against a local UDP server.
+    pub fn lookup_ipv6_test<E: Executor, R: ConnectionProvider>(exec: E, handle: R) {
+        local_lookup_test(true, exec, handle);
+    }
+
+    fn local_lookup_test<E: Executor, R: ConnectionProvider>(ipv6: bool, mut exec: E, handle: R) {
+        let (answer, strategy, expected) = if ipv6 {
+            (
+                RData::AAAA(AAAA::new(
+                    0x2606, 0x2800, 0x21f, 0xcb07, 0x6820, 0x80da, 0xaf6b, 0x8b2c,
+                )),
+                LookupIpStrategy::Ipv6Only,
+                IpAddr::V6(Ipv6Addr::new(
+                    0x2606, 0x2800, 0x21f, 0xcb07, 0x6820, 0x80da, 0xaf6b, 0x8b2c,
+                )),
+            )
+        } else {
+            (
+                RData::A(A::new(93, 184, 215, 14)),
+                LookupIpStrategy::Ipv4Only,
+                IpAddr::V4(Ipv4Addr::new(93, 184, 215, 14)),
+            )
+        };
+        let server = LocalDns::with_answer(answer);
+        let resolver = Resolver::new(
+            ResolverConfig::from_parts(None, vec![], server.name_servers()),
+            ResolverOpts {
+                ip_strategy: strategy,
+                ..search_options()
+            },
+            handle,
+        );
+        for _ in 0..2 {
+            let response = exec
+                .block_on(resolver.lookup_ip("www.example.com."))
+                .unwrap();
+            assert_eq!(response.iter().collect::<Vec<_>>(), [expected]);
+        }
+        server.assert_queries(&["www.example.com."]);
     }
 
     /// Test IP lookup from IP literals.
@@ -648,30 +711,16 @@ pub mod testing {
             Name::from_str("bad.example.com.").unwrap(),
             Name::from_str("wrong.example.com.").unwrap(),
         ];
-        let name_servers: Vec<NameServerConfig> =
-            ResolverConfig::default().name_servers().to_owned();
+        let server = LocalDns::new();
 
         let resolver = Resolver::<R>::new(
-            ResolverConfig::from_parts(Some(domain), search, name_servers),
-            ResolverOpts {
-                ip_strategy: LookupIpStrategy::Ipv4Only,
-                ..ResolverOpts::default()
-            },
+            ResolverConfig::from_parts(Some(domain), search, server.name_servers()),
+            search_options(),
             handle,
         );
 
-        let response = exec
-            .block_on(resolver.lookup_ip("www.example.com."))
-            .expect("failed to run lookup");
-
-        assert_eq!(response.iter().count(), 1);
-        for address in response.iter() {
-            if address.is_ipv4() {
-                assert_eq!(address, IpAddr::V4(Ipv4Addr::new(93, 184, 215, 14)));
-            } else {
-                panic!("should only be looking up IPv4");
-            }
-        }
+        assert_search_lookup(&mut exec, &resolver, "www.example.com.");
+        server.assert_queries(&["www.example.com."]);
     }
 
     /// Test ndots with non-fqdn.
@@ -681,33 +730,21 @@ pub mod testing {
             Name::from_str("bad.example.com.").unwrap(),
             Name::from_str("wrong.example.com.").unwrap(),
         ];
-        let name_servers: Vec<NameServerConfig> =
-            ResolverConfig::default().name_servers().to_owned();
+        let server = LocalDns::new();
 
         let resolver = Resolver::<R>::new(
-            ResolverConfig::from_parts(Some(domain), search, name_servers),
+            ResolverConfig::from_parts(Some(domain), search, server.name_servers()),
             ResolverOpts {
                 // our name does have 2, the default should be fine, let's just narrow the test criteria a bit.
                 ndots: 2,
-                ip_strategy: LookupIpStrategy::Ipv4Only,
-                ..ResolverOpts::default()
+                ..search_options()
             },
             handle,
         );
 
         // notice this is not a FQDN, no trailing dot.
-        let response = exec
-            .block_on(resolver.lookup_ip("www.example.com"))
-            .expect("failed to run lookup");
-
-        assert_eq!(response.iter().count(), 1);
-        for address in response.iter() {
-            if address.is_ipv4() {
-                assert_eq!(address, IpAddr::V4(Ipv4Addr::new(93, 184, 215, 14)));
-            } else {
-                panic!("should only be looking up IPv4");
-            }
-        }
+        assert_search_lookup(&mut exec, &resolver, "www.example.com");
+        server.assert_queries(&["www.example.com."]);
     }
 
     /// Test large ndots with non-fqdn.
@@ -720,33 +757,26 @@ pub mod testing {
             Name::from_str("bad.example.com.").unwrap(),
             Name::from_str("wrong.example.com.").unwrap(),
         ];
-        let name_servers: Vec<NameServerConfig> =
-            ResolverConfig::default().name_servers().to_owned();
+        let server = LocalDns::new();
 
         let resolver = Resolver::<R>::new(
-            ResolverConfig::from_parts(Some(domain), search, name_servers),
+            ResolverConfig::from_parts(Some(domain), search, server.name_servers()),
             ResolverOpts {
                 // matches kubernetes default
                 ndots: 5,
-                ip_strategy: LookupIpStrategy::Ipv4Only,
-                ..ResolverOpts::default()
+                ..search_options()
             },
             handle,
         );
 
         // notice this is not a FQDN, no trailing dot.
-        let response = exec
-            .block_on(resolver.lookup_ip("www.example.com"))
-            .expect("failed to run lookup");
-
-        assert_eq!(response.iter().count(), 1);
-        for address in response.iter() {
-            if address.is_ipv4() {
-                assert_eq!(address, IpAddr::V4(Ipv4Addr::new(93, 184, 215, 14)));
-            } else {
-                panic!("should only be looking up IPv4");
-            }
-        }
+        assert_search_lookup(&mut exec, &resolver, "www.example.com");
+        server.assert_queries(&[
+            "www.example.com.incorrect.example.com.",
+            "www.example.com.bad.example.com.",
+            "www.example.com.wrong.example.com.",
+            "www.example.com.",
+        ]);
     }
 
     /// Test domain search.
@@ -760,31 +790,17 @@ pub mod testing {
             Name::from_str("bad.example.com.").unwrap(),
             Name::from_str("wrong.example.com.").unwrap(),
         ];
-        let name_servers: Vec<NameServerConfig> =
-            ResolverConfig::default().name_servers().to_owned();
+        let server = LocalDns::new();
 
         let resolver = Resolver::<R>::new(
-            ResolverConfig::from_parts(Some(domain), search, name_servers),
-            ResolverOpts {
-                ip_strategy: LookupIpStrategy::Ipv4Only,
-                ..ResolverOpts::default()
-            },
+            ResolverConfig::from_parts(Some(domain), search, server.name_servers()),
+            search_options(),
             handle,
         );
 
         // notice no dots, should not trigger ndots rule
-        let response = exec
-            .block_on(resolver.lookup_ip("www"))
-            .expect("failed to run lookup");
-
-        assert_eq!(response.iter().count(), 1);
-        for address in response.iter() {
-            if address.is_ipv4() {
-                assert_eq!(address, IpAddr::V4(Ipv4Addr::new(93, 184, 215, 14)));
-            } else {
-                panic!("should only be looking up IPv4");
-            }
-        }
+        assert_search_lookup(&mut exec, &resolver, "www");
+        server.assert_queries(&["www.example.com."]);
     }
 
     /// Test search lists.
@@ -799,30 +815,47 @@ pub mod testing {
             // this should combine with the search name to form www.example.com
             Name::from_str("example.com.").unwrap(),
         ];
-        let name_servers: Vec<NameServerConfig> =
-            ResolverConfig::default().name_servers().to_owned();
+        let server = LocalDns::new();
 
         let resolver = Resolver::<R>::new(
-            ResolverConfig::from_parts(Some(domain), search, name_servers),
-            ResolverOpts {
-                ip_strategy: LookupIpStrategy::Ipv4Only,
-                ..ResolverOpts::default()
-            },
+            ResolverConfig::from_parts(Some(domain), search, server.name_servers()),
+            search_options(),
             handle,
         );
 
         // notice no dots, should not trigger ndots rule
-        let response = exec
-            .block_on(resolver.lookup_ip("www"))
-            .expect("failed to run lookup");
+        assert_search_lookup(&mut exec, &resolver, "www");
+        server.assert_queries(&[
+            "www.incorrect.example.com.",
+            "www.bad.example.com.",
+            "www.example.com.",
+        ]);
+    }
 
-        assert_eq!(response.iter().count(), 1);
-        for address in response.iter() {
-            if address.is_ipv4() {
-                assert_eq!(address, IpAddr::V4(Ipv4Addr::new(93, 184, 215, 14)));
-            } else {
-                panic!("should only be looking up IPv4");
-            }
+    fn search_options() -> ResolverOpts {
+        ResolverOpts {
+            ip_strategy: LookupIpStrategy::Ipv4Only,
+            use_hosts_file: ResolveHosts::Never,
+            timeout: std::time::Duration::from_secs(1),
+            attempts: 1,
+            ..ResolverOpts::default()
+        }
+    }
+
+    fn assert_search_lookup<E: Executor, R: ConnectionProvider>(
+        exec: &mut E,
+        resolver: &Resolver<R>,
+        name: &str,
+    ) {
+        // Repeat the full lookup: positive answers and preceding search misses must be cached.
+        for _ in 0..2 {
+            let response = exec
+                .block_on(resolver.lookup_ip(name))
+                .expect("failed to run lookup");
+            assert_eq!(
+                response.iter().collect::<Vec<_>>(),
+                [IpAddr::V4(Ipv4Addr::new(93, 184, 215, 14))]
+            );
         }
     }
 
@@ -1015,23 +1048,19 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_google() {
-        use super::testing::lookup_test;
+    fn test_lookup_ipv4() {
+        use super::testing::lookup_ipv4_test;
         let io_loop = Runtime::new().expect("failed to create tokio runtime");
         let handle = TokioConnectionProvider::default();
-        lookup_test::<Runtime, TokioConnectionProvider>(ResolverConfig::google(), io_loop, handle)
+        lookup_ipv4_test::<Runtime, TokioConnectionProvider>(io_loop, handle)
     }
 
     #[test]
-    fn test_lookup_cloudflare() {
-        use super::testing::lookup_test;
+    fn test_lookup_ipv6() {
+        use super::testing::lookup_ipv6_test;
         let io_loop = Runtime::new().expect("failed to create tokio runtime");
         let handle = TokioConnectionProvider::default();
-        lookup_test::<Runtime, TokioConnectionProvider>(
-            ResolverConfig::cloudflare(),
-            io_loop,
-            handle,
-        )
+        lookup_ipv6_test::<Runtime, TokioConnectionProvider>(io_loop, handle)
     }
 
     #[test]
@@ -1048,17 +1077,6 @@ mod tests {
         let _io_loop = Runtime::new().expect("failed to create tokio runtime io_loop");
         let handle = TokioConnectionProvider::default();
         ip_lookup_across_threads_test::<Runtime, TokioConnectionProvider>(handle)
-    }
-
-    #[test]
-    #[cfg(feature = "dnssec")]
-    fn test_sec_lookup() {
-        use super::testing::sec_lookup_test;
-        use test_support::subscribe;
-        subscribe();
-        let io_loop = Runtime::new().expect("failed to create tokio runtime io_loop");
-        let handle = TokioConnectionProvider::default();
-        sec_lookup_test::<Runtime, TokioConnectionProvider>(io_loop, handle);
     }
 
     #[test]

@@ -467,7 +467,7 @@ impl<'a> Parser<'a> {
         }
 
         let (mut state, mut value) = (None, 0_u32);
-        for (i, c) in ttl_str.chars().enumerate() {
+        for (i, c) in ttl_str.char_indices() {
             let start = match (state, c) {
                 (None, '0'..='9') => {
                     state = Some(i);
@@ -478,7 +478,6 @@ impl<'a> Parser<'a> {
                 _ => return Err(ParseErrorKind::ParseTime(ttl_str.to_string()).into()),
             };
 
-            // All allowed chars are ASCII, so using char indexes to slice &[u8] is OK
             let number = u32::from_str(&ttl_str[start..i])
                 .map_err(|_| ParseErrorKind::ParseTime(ttl_str.to_string()))?;
 
@@ -500,7 +499,6 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(start) = state {
-            // All allowed chars are ASCII, so using char indexes to slice &[u8] is OK
             let number = u32::from_str(&ttl_str[start..])
                 .map_err(|_| ParseErrorKind::ParseTime(ttl_str.to_string()))?;
             value = value
@@ -528,6 +526,33 @@ const MAX_INCLUDE_LEVEL: usize = 256;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_time_preserves_ascii_and_overflow_contracts() {
+        for (input, expected) in [
+            ("0", 0),
+            ("1h2m3s4", 3727),
+            ("1W1d", 691200),
+            ("4294967295", u32::MAX),
+            ("4294967295s0", u32::MAX),
+        ] {
+            assert_eq!(Parser::parse_time(input).unwrap(), expected, "{input}");
+        }
+        for input in ["", "s", "1ss", "4294967296", "4294967295s1", "7102w"] {
+            let error = Parser::parse_time(input).unwrap_err();
+            assert!(matches!(error.kind(), ParseErrorKind::ParseTime(value) if value == input));
+        }
+    }
+
+    #[test]
+    fn parse_time_rejects_unicode_before_slicing() {
+        // Non-ASCII input must preserve the original ParseTime error, not panic
+        // or accept Unicode digits as ASCII TTL syntax.
+        for input in ["é1", "1é", "1sé", "1m١", "１２s", "1\u{0301}s", "1h🦀2m"] {
+            let error = Parser::parse_time(input).unwrap_err();
+            assert!(matches!(error.kind(), ParseErrorKind::ParseTime(value) if value == input));
+        }
+    }
 
     #[test]
     #[allow(clippy::uninlined_format_args)]

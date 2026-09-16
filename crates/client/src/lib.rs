@@ -123,9 +123,9 @@
 //!     // wait for its response
 //!     let response = query.await.unwrap();
 //!
-//!     // validate it's what we expected
+//!     // Inspect the returned address; public DNS answers can change.
 //!     if let RData::A(addr) = response.answers()[0].data() {
-//!         assert_eq!(*addr, A::new(93, 184, 215, 14));
+//!         println!("IPv4 address: {addr}");
 //!     }
 //! }
 //! ```
@@ -144,6 +144,8 @@ mod error;
 pub use error::{Error as ClientError, ErrorKind as ClientErrorKind};
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wire_fixture;
 
 pub use hickory_proto as proto;
 

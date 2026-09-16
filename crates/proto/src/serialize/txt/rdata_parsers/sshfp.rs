@@ -48,8 +48,11 @@ pub(crate) fn parse<'i, I: Iterator<Item = &'i str>>(mut tokens: I) -> ParseResu
             .ok_or_else(|| missing_field::<ParseError>("fingerprint"))?
             .as_bytes(),
     )?;
-    Some(SSHFP::new(algorithm, fingerprint_type, fingerprint))
-        .filter(|_| tokens.next().is_none())
+    let fingerprint = SSHFP::new(algorithm, fingerprint_type, fingerprint);
+    tokens
+        .next()
+        .is_none()
+        .then_some(fingerprint)
         .ok_or_else(|| ParseErrorKind::Message("too many fields for SSHFP").into())
 }
 

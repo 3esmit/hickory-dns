@@ -64,7 +64,6 @@
 //! # fn main() {
 //! # #[cfg(feature = "tokio-runtime")]
 //! # {
-//! use std::net::*;
 //! use tokio::runtime::Runtime;
 //! use hickory_resolver::TokioResolver;
 //! use hickory_resolver::config::*;
@@ -91,11 +90,8 @@
 //! // There can be many addresses associated with the name,
 //! //  this can return IPv4 and/or IPv6 addresses
 //! let address = response.iter().next().expect("no addresses returned!");
-//! if address.is_ipv4() {
-//!     assert_eq!(address, IpAddr::V4(Ipv4Addr::new(93, 184, 215, 14)));
-//! } else {
-//!     assert_eq!(address, IpAddr::V6(Ipv6Addr::new(0x2606, 0x2800, 0x21f, 0xcb07, 0x6820, 0x80da, 0xaf6b, 0x8b2c)));
-//! }
+//! // Public DNS answers can change; use the returned address rather than a fixed IP.
+//! println!("First address: {address}");
 //! # }
 //! # }
 //! ```
@@ -218,6 +214,15 @@ pub use proto::rr::{IntoName, Name};
 pub mod caching_client;
 pub mod config;
 pub mod dns_lru;
+#[cfg(all(
+    test,
+    any(
+        feature = "dns-over-https-rustls",
+        feature = "dns-over-h3",
+        feature = "dns-over-quic"
+    )
+))]
+mod encrypted_tests;
 mod error;
 pub use error::{ResolveError, ResolveErrorKind};
 #[cfg(feature = "dns-over-https-rustls")]
@@ -225,6 +230,8 @@ mod h2;
 #[cfg(feature = "dns-over-h3")]
 mod h3;
 mod hosts;
+#[cfg(any(test, feature = "testing"))]
+mod local_dns;
 pub use hosts::Hosts;
 pub mod lookup;
 pub mod lookup_ip;

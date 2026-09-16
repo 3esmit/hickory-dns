@@ -5,22 +5,25 @@ use std::{
 
 use futures::{Future, FutureExt, TryFutureExt};
 use test_support::subscribe;
-#[cfg(feature = "dnssec")]
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use time::Duration;
-use tokio::runtime::Runtime;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, UdpSocket},
+    runtime::Runtime,
+};
 
 use hickory_client::{
     client::{Client, ClientHandle},
     ClientErrorKind,
 };
 use hickory_integration::{
-    example_authority::create_example, NeverReturnsClientStream, TestClientStream, GOOGLE_V4,
-    GOOGLE_V6, TEST3_V4,
+    example_authority::create_example, NeverReturnsClientStream, TestClientStream, GOOGLE_V6,
+    TEST3_V4,
 };
-#[cfg(feature = "dnssec")]
+#[cfg(all(feature = "dnssec", feature = "sqlite"))]
 use hickory_proto::{
     dnssec::SigSigner,
-    rr::Record,
     xfer::{DnsExchangeBackground, DnsMultiplexer},
 };
 #[cfg(all(feature = "dnssec", feature = "sqlite"))]
@@ -35,13 +38,13 @@ use hickory_proto::{
             opt::{EdnsCode, EdnsOption},
             A,
         },
-        DNSClass, Name, RData, RecordSet, RecordType,
+        DNSClass, Name, RData, Record, RecordSet, RecordType,
     },
     runtime::TokioRuntimeProvider,
     tcp::TcpClientStream,
     udp::UdpClientStream,
     xfer::FirstAnswer,
-    DnsHandle,
+    DnsHandle, ProtoError,
 };
 use hickory_server::authority::{Authority, Catalog};
 
@@ -63,18 +66,33 @@ fn test_query_nonet() {
     io_loop.block_on(test_query(&mut client));
 }
 
-#[test]
-fn test_query_udp_ipv4() {
-    let io_loop = Runtime::new().unwrap();
-    let stream = UdpClientStream::builder(GOOGLE_V4, TokioRuntimeProvider::new()).build();
-    let client = Client::connect(stream);
-    let (mut client, bg) = io_loop.block_on(client).expect("client failed to connect");
-    hickory_proto::runtime::spawn_bg(&io_loop, bg);
-
-    // TODO: timeouts on these requests so that the test doesn't hang
-    io_loop.block_on(test_query(&mut client));
-    io_loop.block_on(test_query(&mut client));
-    io_loop.block_on(test_query_edns(&mut client));
+#[tokio::test]
+async fn test_query_udp_ipv4() {
+    let socket = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = socket.local_addr().unwrap();
+    let server = async {
+        let mut buffer = [0; 4096];
+        for index in 0..3 {
+            let (length, peer) = socket.recv_from(&mut buffer).await.unwrap();
+            let response = local_query_response(&buffer[..length], index == 2);
+            assert_eq!(
+                socket.send_to(&response, peer).await.unwrap(),
+                response.len()
+            );
+        }
+    };
+    let client = async {
+        let stream = UdpClientStream::builder(address, TokioRuntimeProvider::new()).build();
+        let (client, background) = Client::connect(stream).await.unwrap();
+        check_local_queries(client, background, true).await;
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(server, client);
+    })
+    .await
+    .expect("local UDP query timeout");
 }
 
 #[test]
@@ -92,17 +110,99 @@ fn test_query_udp_ipv6() {
     io_loop.block_on(test_query_edns(&mut client));
 }
 
-#[test]
-fn test_query_tcp_ipv4() {
-    let io_loop = Runtime::new().unwrap();
-    let (stream, sender) = TcpClientStream::new(GOOGLE_V4, None, None, TokioRuntimeProvider::new());
-    let client = Client::new(stream, sender, None);
-    let (mut client, bg) = io_loop.block_on(client).expect("client failed to connect");
-    hickory_proto::runtime::spawn_bg(&io_loop, bg);
+#[tokio::test]
+async fn test_query_tcp_ipv4() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let server = async {
+        // Both queries must arrive on the same accepted connection.
+        let (mut socket, _) = listener.accept().await.unwrap();
+        for _ in 0..2 {
+            let length = usize::from(socket.read_u16().await.unwrap());
+            assert!(length <= 4096);
+            let mut buffer = vec![0; length];
+            socket.read_exact(&mut buffer).await.unwrap();
+            let response = local_query_response(&buffer, false);
+            socket
+                .write_u16(response.len().try_into().unwrap())
+                .await
+                .unwrap();
+            socket.write_all(&response).await.unwrap();
+        }
+        // Keep the socket alive until the client has consumed the final reply.
+        finished.await.unwrap();
+    };
+    let client = async {
+        let (stream, sender) =
+            TcpClientStream::new(address, None, None, TokioRuntimeProvider::new());
+        let (client, background) = Client::new(stream, sender, None).await.unwrap();
+        check_local_queries(client, background, false).await;
+        done.send(()).unwrap();
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(server, client);
+    })
+    .await
+    .expect("local TCP query timeout");
+}
 
-    // TODO: timeouts on these requests so that the test doesn't hang
-    io_loop.block_on(test_query(&mut client));
-    io_loop.block_on(test_query(&mut client));
+pub(super) fn local_query_response(bytes: &[u8], subnet: bool) -> Vec<u8> {
+    let request = Message::from_vec(bytes).unwrap();
+    let name = Name::from_ascii("WWW.example.com.").unwrap();
+    assert_eq!(request.message_type(), MessageType::Query);
+    assert_eq!(request.op_code(), OpCode::Query);
+    assert_eq!(
+        request.queries(),
+        &[Query::query(name.clone(), RecordType::A)]
+    );
+    assert!(request.queries()[0].name().eq_case(&name));
+    let edns = request.extensions().as_ref().expect("EDNS request");
+    assert_eq!(edns.version(), 0);
+    if subnet {
+        assert_eq!(edns.max_payload(), 1232);
+        assert_eq!(
+            edns.option(EdnsCode::Subnet),
+            Some(&EdnsOption::Subnet("1.2.0.0/16".parse().unwrap()))
+        );
+    } else {
+        assert!(edns.option(EdnsCode::Subnet).is_none());
+    }
+    let mut response = Message::new();
+    response
+        .set_id(request.id())
+        .set_message_type(MessageType::Response)
+        .set_response_code(ResponseCode::NoError)
+        .add_query(request.queries()[0].clone())
+        .add_answer(Record::from_rdata(
+            name,
+            60,
+            RData::A(A::new(93, 184, 215, 14)),
+        ))
+        .set_edns(edns.clone());
+    response.to_vec().unwrap()
+}
+
+async fn check_local_queries(
+    mut client: Client,
+    background: impl Future<Output = Result<(), ProtoError>>,
+    subnet: bool,
+) {
+    let queries = async {
+        test_query(&mut client).await;
+        test_query(&mut client).await;
+        if subnet {
+            test_query_edns(&mut client).await;
+        }
+    };
+    // Poll the driver with the queries, then deliberately drop it at test completion.
+    // Neither this driver nor the owning server future is detached on timeout/panic.
+    tokio::select! {
+        _ = queries => {}
+        result = background => panic!("client driver ended before queries: {result:?}"),
+    }
 }
 
 #[test]
@@ -119,44 +219,95 @@ fn test_query_tcp_ipv6() {
     io_loop.block_on(test_query(&mut client));
 }
 
-#[test]
+#[tokio::test]
 #[cfg(feature = "dns-over-https-rustls")]
-fn test_query_https() {
-    use hickory_integration::CLOUDFLARE_V4_TLS;
+async fn test_query_https() {
     use hickory_proto::h2::HttpsClientStreamBuilder;
-    use rustls::{ClientConfig, RootCertStore};
+    use hickory_server::ServerFuture;
+    use rustls::{
+        pki_types::{CertificateDer, PrivatePkcs8KeyDer},
+        ClientConfig, RootCertStore,
+    };
+    use test_support::tls::TestIdentity;
 
     const ALPN_H2: &[u8] = b"h2";
+    const SERVER_NAME: &str = "ns.example.test";
 
-    let io_loop = Runtime::new().unwrap();
-
-    // using the mozilla default root store
+    let identity = TestIdentity::new(SERVER_NAME).unwrap();
     let mut root_store = RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    root_store
+        .add(CertificateDer::from(identity.ca.to_der().unwrap()))
+        .unwrap();
+    let unrelated = TestIdentity::new(SERVER_NAME).unwrap();
+    let mut unrelated_roots = RootCertStore::empty();
+    unrelated_roots
+        .add(CertificateDer::from(unrelated.ca.to_der().unwrap()))
+        .unwrap();
 
-    let mut client_config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let authority = create_example();
+    let mut catalog = Catalog::new();
+    catalog.upsert(authority.origin().clone(), vec![Arc::new(authority)]);
+    let mut server = ServerFuture::new(catalog);
+    server
+        .register_https_listener(
+            listener,
+            std::time::Duration::from_secs(5),
+            (
+                vec![CertificateDer::from(identity.cert.to_der().unwrap())],
+                PrivatePkcs8KeyDer::from(identity.key.private_key_to_pkcs8().unwrap()).into(),
+            ),
+            Some(SERVER_NAME.to_owned()),
+            "/dns-query".to_owned(),
+        )
+        .unwrap();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        for (roots, requested_name, certificate_error) in [
+            (root_store.clone(), SERVER_NAME, None),
+            (root_store, "wrong.example.test", Some("NotValidForName")),
+            // The unrelated CA has the same issuer name, but a different signing key.
+            (unrelated_roots, SERVER_NAME, Some("BadSignature")),
+        ] {
+            let mut client_config = ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
             .with_safe_default_protocol_versions()
             .unwrap()
-            .with_root_certificates(root_store)
+            .with_root_certificates(roots)
             .with_no_client_auth();
-    client_config.alpn_protocols.push(ALPN_H2.to_vec());
-
-    let https_builder = HttpsClientStreamBuilder::with_client_config(
-        Arc::new(client_config),
-        TokioRuntimeProvider::new(),
-    );
-    let client = Client::connect(https_builder.build(
-        CLOUDFLARE_V4_TLS,
-        "cloudflare-dns.com".to_string(),
-        "/dns-query".to_string(),
-    ));
-    let (mut client, bg) = io_loop.block_on(client).expect("client failed to connect");
-    hickory_proto::runtime::spawn_bg(&io_loop, bg);
-
-    // TODO: timeouts on these requests so that the test doesn't hang
-    io_loop.block_on(test_query(&mut client));
-    io_loop.block_on(test_query(&mut client));
+            client_config.alpn_protocols.push(ALPN_H2.to_vec());
+            let https_builder = HttpsClientStreamBuilder::with_client_config(
+                Arc::new(client_config),
+                TokioRuntimeProvider::new(),
+            );
+            let connection = Client::connect(https_builder.build(
+                address,
+                requested_name.to_owned(),
+                "/dns-query".to_owned(),
+            ))
+            .await;
+            if let Some(expected) = certificate_error {
+                let error = connection.err().expect("invalid certificate accepted");
+                assert!(error.to_string().contains(expected), "{error}");
+            } else {
+                let (client, background) = connection.unwrap();
+                check_local_queries(client, background, false).await;
+            }
+        }
+    })
+    .await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        server.shutdown_gracefully(),
+    )
+    .await
+    .expect("local HTTPS shutdown timeout")
+    .expect("local HTTPS shutdown failed");
+    result.expect("local HTTPS query timeout");
 }
 
 #[cfg(test)]
@@ -403,8 +554,8 @@ fn test_create_multi() {
     assert_eq!(result.response_code(), ResponseCode::NoError);
     assert_eq!(result.answers().len(), 2);
 
-    assert!(result.answers().iter().any(|rr| *rr == record));
-    assert!(result.answers().iter().any(|rr| *rr == record2));
+    assert!(result.answers().contains(&record));
+    assert!(result.answers().contains(&record2));
 
     // trying to create again should error
     // TODO: it would be cool to make this
@@ -481,8 +632,8 @@ fn test_append() {
     assert_eq!(result.response_code(), ResponseCode::NoError);
     assert_eq!(result.answers().len(), 2);
 
-    assert!(result.answers().iter().any(|rr| *rr == record));
-    assert!(result.answers().iter().any(|rr| *rr == record2));
+    assert!(result.answers().contains(&record));
+    assert!(result.answers().contains(&record2));
 
     // show that appending the same thing again is ok, but doesn't add any records
     let result = io_loop
@@ -564,9 +715,9 @@ fn test_append_multi() {
     assert_eq!(result.response_code(), ResponseCode::NoError);
     assert_eq!(result.answers().len(), 3);
 
-    assert!(result.answers().iter().any(|rr| *rr == record));
-    assert!(result.answers().iter().any(|rr| *rr == record2));
-    assert!(result.answers().iter().any(|rr| *rr == record3));
+    assert!(result.answers().contains(&record));
+    assert!(result.answers().contains(&record2));
+    assert!(result.answers().contains(&record3));
 
     // show that appending the same thing again is ok, but doesn't add any records
     // TODO: technically this is a test for the Server, not client...
@@ -620,8 +771,8 @@ fn test_compare_and_swap() {
         .expect("query failed");
     assert_eq!(result.response_code(), ResponseCode::NoError);
     assert_eq!(result.answers().len(), 1);
-    assert!(result.answers().iter().any(|rr| *rr == new));
-    assert!(!result.answers().iter().any(|rr| *rr == current));
+    assert!(result.answers().contains(&new));
+    assert!(!result.answers().contains(&current));
 
     // check the it fails if tried again.
     let mut not = new.clone();
@@ -638,8 +789,8 @@ fn test_compare_and_swap() {
         .expect("query failed");
     assert_eq!(result.response_code(), ResponseCode::NoError);
     assert_eq!(result.answers().len(), 1);
-    assert!(result.answers().iter().any(|rr| *rr == new));
-    assert!(!result.answers().iter().any(|rr| *rr == not));
+    assert!(result.answers().contains(&new));
+    assert!(!result.answers().contains(&not));
 }
 
 #[cfg(all(feature = "dnssec", feature = "sqlite"))]
@@ -684,10 +835,10 @@ fn test_compare_and_swap_multi() {
         .expect("query failed");
     assert_eq!(result.response_code(), ResponseCode::NoError);
     assert_eq!(result.answers().len(), 2);
-    assert!(result.answers().iter().any(|rr| *rr == new1));
-    assert!(result.answers().iter().any(|rr| *rr == new2));
-    assert!(!result.answers().iter().any(|rr| *rr == current1));
-    assert!(!result.answers().iter().any(|rr| *rr == current2));
+    assert!(result.answers().contains(&new1));
+    assert!(result.answers().contains(&new2));
+    assert!(!result.answers().contains(&current1));
+    assert!(!result.answers().contains(&current2));
 
     // check the it fails if tried again.
     let mut not = new1.clone();
@@ -704,8 +855,8 @@ fn test_compare_and_swap_multi() {
         .expect("query failed");
     assert_eq!(result.response_code(), ResponseCode::NoError);
     assert_eq!(result.answers().len(), 2);
-    assert!(result.answers().iter().any(|rr| *rr == new1));
-    assert!(!result.answers().iter().any(|rr| *rr == not));
+    assert!(result.answers().contains(&new1));
+    assert!(!result.answers().contains(&not));
 }
 
 #[cfg(all(feature = "dnssec", feature = "sqlite"))]
@@ -756,7 +907,7 @@ fn test_delete_by_rdata() {
         .expect("query failed");
     assert_eq!(result.response_code(), ResponseCode::NoError);
     assert_eq!(result.answers().len(), 1);
-    assert!(result.answers().iter().any(|rr| *rr == record1));
+    assert!(result.answers().contains(&record1));
 }
 
 #[cfg(all(feature = "dnssec", feature = "sqlite"))]
@@ -830,10 +981,10 @@ fn test_delete_by_rdata_multi() {
         .expect("query failed");
     assert_eq!(result.response_code(), ResponseCode::NoError);
     assert_eq!(result.answers().len(), 2);
-    assert!(!result.answers().iter().any(|rr| *rr == record1));
-    assert!(result.answers().iter().any(|rr| *rr == record2));
-    assert!(!result.answers().iter().any(|rr| *rr == record3));
-    assert!(result.answers().iter().any(|rr| *rr == record4));
+    assert!(!result.answers().contains(&record1));
+    assert!(result.answers().contains(&record2));
+    assert!(!result.answers().contains(&record3));
+    assert!(result.answers().contains(&record4));
 }
 
 #[cfg(all(feature = "dnssec", feature = "sqlite"))]

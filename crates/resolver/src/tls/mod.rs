@@ -25,56 +25,5 @@ cfg_if! {
     }
 }
 
-#[cfg(any(feature = "dns-over-native-tls", feature = "dns-over-rustls"))]
-#[cfg(any(feature = "webpki-roots", feature = "native-certs"))]
 #[cfg(test)]
-mod tests {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
-    use tokio::runtime::Runtime;
-
-    use crate::config::{ResolverConfig, ResolverOpts};
-    use crate::name_server::TokioConnectionProvider;
-    use crate::TokioResolver;
-
-    fn tls_test(config: ResolverConfig) {
-        let io_loop = Runtime::new().unwrap();
-
-        let resolver = TokioResolver::new(
-            config,
-            ResolverOpts {
-                try_tcp_on_error: true,
-                ..ResolverOpts::default()
-            },
-            TokioConnectionProvider::default(),
-        );
-
-        let response = io_loop
-            .block_on(resolver.lookup_ip("www.example.com."))
-            .expect("failed to run lookup");
-
-        assert_eq!(response.iter().count(), 1);
-        for address in response.iter() {
-            if address.is_ipv4() {
-                assert_eq!(address, IpAddr::V4(Ipv4Addr::new(93, 184, 215, 14)));
-            } else {
-                assert_eq!(
-                    address,
-                    IpAddr::V6(Ipv6Addr::new(
-                        0x2606, 0x2800, 0x21f, 0xcb07, 0x6820, 0x80da, 0xaf6b, 0x8b2c,
-                    ))
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_google_tls() {
-        tls_test(ResolverConfig::google_tls())
-    }
-
-    #[test]
-    fn test_cloudflare_tls() {
-        tls_test(ResolverConfig::cloudflare_tls())
-    }
-}
+mod tests;

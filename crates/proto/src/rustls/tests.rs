@@ -7,8 +7,6 @@
 
 #![allow(clippy::dbg_macro, clippy::print_stdout)]
 
-use std::env;
-use std::fs::File;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -16,9 +14,7 @@ use std::sync::atomic;
 use std::sync::Arc;
 use std::{thread, time};
 
-use openssl::pkey::PKey;
 use openssl::ssl::*;
-use openssl::x509::*;
 
 use futures_util::stream::StreamExt;
 use rustls::pki_types::CertificateDer;
@@ -47,15 +43,6 @@ fn test_tls_client_stream_ipv6() {
 const TEST_BYTES: &[u8; 8] = b"DEADBEEF";
 const TEST_BYTES_LEN: usize = 8;
 
-fn read_file(path: &str) -> Vec<u8> {
-    let mut bytes = vec![];
-
-    let mut file = File::open(path).unwrap_or_else(|_| panic!("failed to open file: {}", path));
-    file.read_to_end(&mut bytes)
-        .unwrap_or_else(|_| panic!("failed to open file: {}", path));
-    bytes
-}
-
 #[allow(unused_mut)]
 fn tls_client_stream_test(server_addr: IpAddr) {
     let succeeded = Arc::new(atomic::AtomicBool::new(false));
@@ -76,24 +63,12 @@ fn tls_client_stream_test(server_addr: IpAddr) {
         })
         .unwrap();
 
-    let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "../..".to_owned());
-    println!("using server src path: {server_path}");
-
-    let root_cert_der =
-        CertificateDer::from(read_file(&format!("{server_path}/tests/test-data/ca.der")));
-
-    // Generate X509 certificate
-    let ca = X509::from_der(&root_cert_der).expect("could not read CA");
     let dns_name = "ns.example.com";
-    let cert = X509::from_pem(&read_file(&format!(
-        "{server_path}/tests/test-data/cert.pem"
-    )))
-    .expect("could not read cert pem");
-
-    let private_key = PKey::private_key_from_pem(&read_file(&format!(
-        "{server_path}/tests/test-data/cert.key"
-    )))
-    .expect("could not read public key");
+    let identity = crate::tests::tls::TestIdentity::new(dns_name).expect("test identity");
+    let root_cert_der = CertificateDer::from(identity.ca.to_der().expect("root DER"));
+    let ca = identity.ca;
+    let cert = identity.cert;
+    let private_key = identity.key;
 
     // TODO: need a timeout on listen
     let server = std::net::TcpListener::bind(SocketAddr::new(server_addr, 0)).unwrap();

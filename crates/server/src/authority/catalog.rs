@@ -376,7 +376,7 @@ impl Catalog {
     }
 
     /// Recursively searches the catalog for a matching authority
-    pub fn find(&self, name: &LowerName) -> Option<&Vec<Arc<(dyn AuthorityObject + 'static)>>> {
+    pub fn find(&self, name: &LowerName) -> Option<&Vec<Arc<dyn AuthorityObject + 'static>>> {
         debug!("searching authorities for: {name}");
         self.authorities.get(name).or_else(|| {
             if !name.is_root() {
@@ -389,7 +389,7 @@ impl Catalog {
     }
 }
 
-async fn lookup<'a, R: ResponseHandler + Unpin>(
+async fn lookup<R: ResponseHandler + Unpin>(
     request_info: RequestInfo<'_>,
     authorities: &[Arc<dyn AuthorityObject>],
     request: &Request,
@@ -620,11 +620,10 @@ async fn build_authoritative_response(
                     iterations,
                 }) = authority.nx_proof_kind()
                 {
-                    // This unwrap will not panic as we know that `answers` is `Some`.
-                    let has_wildcard_match =
-                        answers.as_ref().unwrap().iter().any(|rr| {
-                            rr.record_type() == RecordType::RRSIG && rr.name().is_wildcard()
-                        });
+                    let has_wildcard_match = answers
+                        .iter()
+                        .flat_map(|records| records.iter())
+                        .any(|rr| rr.record_type() == RecordType::RRSIG && rr.name().is_wildcard());
 
                     match authority
                         .get_nsec3_records(
@@ -884,7 +883,7 @@ async fn build_forwarded_response(
                 DnssecSummary::Bogus if !request_header.checking_disabled() => {
                     response_header.set_response_code(ResponseCode::ServFail);
                     // do not return Bogus records when CD=0
-                    *soa = Box::<AuthLookup>::default();
+                    **soa = AuthLookup::default();
                     trace!("clearing SOA record from response");
                 }
                 _ => {}

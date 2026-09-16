@@ -68,7 +68,7 @@ impl Clone for DnssecClient {
 }
 
 impl DnsHandle for DnssecClient {
-    type Response = Pin<Box<(dyn Stream<Item = Result<DnsResponse, ProtoError>> + Send + 'static)>>;
+    type Response = Pin<Box<dyn Stream<Item = Result<DnsResponse, ProtoError>> + Send + 'static>>;
 
     fn send<R: Into<DnsRequest> + Unpin + Send + 'static>(&self, request: R) -> Self::Response {
         self.client.send(request)
@@ -97,7 +97,7 @@ where
     /// # Arguments
     ///
     /// * `trust_anchor` - the set of trusted DNSKEY public_keys, by default this only contains the
-    ///                    root public_key.
+    ///   root public_key.
     pub fn trust_anchor(mut self, trust_anchor: TrustAnchor) -> Self {
         self.trust_anchor = Some(trust_anchor);
         self

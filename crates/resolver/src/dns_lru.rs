@@ -516,7 +516,6 @@ impl Expiry<Query, LruValue> for LruValueExpiry {
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
-    use std::time::*;
 
     use hickory_proto::rr::rdata::TXT;
 
@@ -807,7 +806,7 @@ mod tests {
                 2,
             ),
         ];
-        let ips = vec![
+        let ips = [
             RData::A(A::new(127, 0, 0, 1)),
             RData::A(A::new(127, 0, 0, 2)),
         ];
@@ -843,7 +842,7 @@ mod tests {
                 2,
             ),
         ];
-        let ips = vec![
+        let ips = [
             RData::A(A::new(127, 0, 0, 1)),
             RData::A(A::new(127, 0, 0, 2)),
         ];
@@ -906,7 +905,7 @@ mod tests {
                 500,
             ),
         ];
-        let ips = vec![
+        let ips = [
             RData::A(A::new(127, 0, 0, 1)),
             RData::A(A::new(127, 0, 0, 2)),
         ];

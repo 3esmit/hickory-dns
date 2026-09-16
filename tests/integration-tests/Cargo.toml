@@ -55,6 +55,7 @@ dnssec-ring = [
 dnssec = []
 
 dns-over-https-rustls = [
+    "hickory-server/dns-over-https-rustls",
     "hickory-client/dns-over-https-rustls",
     "hickory-resolver/dns-over-https-rustls",
     "dep:rustls",
@@ -110,7 +111,7 @@ webpki-roots = { workspace = true, optional = true }
 [dev-dependencies]
 futures = { workspace = true, features = ["thread-pool"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
-test-support.workspace = true
+test-support = { workspace = true, features = ["tls"] }
 tracing-subscriber.workspace = true
 
 [package.metadata.cargo-all-features]

@@ -1024,9 +1024,11 @@ name = "hickory-resolver"
 version = "0.25.0-alpha.4"
 dependencies = [
  "backtrace",
+ "bytes",
  "cfg-if",
  "futures-executor",
  "futures-util",
+ "h2",
  "hickory-proto",
  "ipconfig",
  "moka",
@@ -2220,6 +2222,7 @@ dependencies = [
 name = "test-support"
 version = "0.25.0-alpha.4"
 dependencies = [
+ "openssl",
  "tracing",
  "tracing-subscriber",
 ]

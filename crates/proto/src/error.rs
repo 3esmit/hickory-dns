@@ -1027,6 +1027,7 @@ pub mod not_ring {
     use std;
 
     #[derive(Clone, Copy, Debug)]
+    #[allow(dead_code)]
     pub struct KeyRejected;
 
     #[derive(Clone, Copy, Debug)]
