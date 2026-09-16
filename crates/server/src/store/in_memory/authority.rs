@@ -1592,11 +1592,22 @@ impl Authority for InMemoryAuthority {
                             _ => None,
                         };
 
-                        Ok(closest_encloser_match
+                        let mut proof = Vec::new();
+                        for rrset in closest_encloser_match
                             .into_iter()
                             .chain(next_closer_name_cover)
                             .chain(wildcard_record)
-                            .collect())
+                        {
+                            // One NSEC3 RRset can prove several facts. Emit it and its
+                            // signatures only once, preserving the proof selection order.
+                            if !proof
+                                .iter()
+                                .any(|previous: &Arc<RecordSet>| previous.name() == rrset.name())
+                            {
+                                proof.push(rrset);
+                            }
+                        }
+                        Ok(proof)
                     }
                 }
             }

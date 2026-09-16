@@ -317,7 +317,8 @@ struct ClosestEncloserProofInfo<'a> {
 /// ]
 ///
 /// The list *starts* with `query_name` and *ends* with `soa_name`. Other
-/// code in this module exploits this invariant.
+/// code in this module exploits this invariant. Queries outside the SOA zone
+/// have no candidates.
 ///
 /// In simplest situations when `query_name` is `label.soa_name` it itself
 /// will act as "next closer"
@@ -327,6 +328,11 @@ fn build_encloser_candidates_list(
     salt: &[u8],
     iterations: u16,
 ) -> Vec<HashedNameInfo> {
+    // Cross-zone CNAME responses can carry an unrelated SOA. Without this
+    // check, walking toward that SOA would never terminate at the DNS root.
+    if !soa_name.zone_of(query_name) {
+        return Vec::new();
+    }
     let mut candidates = Vec::with_capacity(query_name.num_labels() as usize);
 
     // `query_name` is our first candidate
@@ -343,9 +349,9 @@ fn build_encloser_candidates_list(
             // `soa_name` is the final candidate, we already added it.
             return candidates;
         }
-        name = name.base_name();
-        // TODO: can `query_name` *not* be a sub-name of `soa_name`?
-        debug_assert_ne!(name, Name::root());
+        let next = name.base_name();
+        debug_assert_ne!(next, name);
+        name = next;
     }
 }
 
@@ -836,5 +842,112 @@ fn wildcard_based_encloser_proof<'a>(
             .map(|record| (closest_encloser_name_info, record)),
         next_closer: next_closer_covering_record.map(|record| (next_closer_name_info, record)),
         closest_encloser_wildcard: wildcard_encloser,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encloser_candidates_reject_unrelated_zones() {
+        let zone = Name::from_ascii("example.com.").unwrap();
+        for query in ["www.other.com.", "com.", ".", "notexample.com."] {
+            let query = Name::from_ascii(query).unwrap();
+            assert!(build_encloser_candidates_list(&query, &zone, &[], 0).is_empty());
+        }
+    }
+
+    #[test]
+    fn encloser_candidates_preserve_in_zone_order() {
+        let zone = Name::from_ascii("example.com.").unwrap();
+        for (query, expected) in [
+            ("example.com.", vec!["example.com."]),
+            ("WWW.Example.COM.", vec!["WWW.Example.COM.", "Example.COM."]),
+            (
+                "a.b.example.com.",
+                vec!["a.b.example.com.", "b.example.com.", "example.com."],
+            ),
+        ] {
+            let query = Name::from_ascii(query).unwrap();
+            let candidates = build_encloser_candidates_list(&query, &zone, &[1, 2], 1);
+            let names: Vec<_> = candidates
+                .iter()
+                .map(|candidate| candidate.name.clone())
+                .collect();
+            let expected: Vec<_> = expected
+                .into_iter()
+                .map(|name| Name::from_ascii(name).unwrap())
+                .collect();
+            assert_eq!(names, expected);
+            for candidate in candidates {
+                assert_eq!(
+                    candidate.hashed_name,
+                    nsec3hash(&candidate.name, &[1, 2], 1)
+                );
+                assert_eq!(
+                    candidate.base32_hashed_name,
+                    data_encoding::BASE32_DNSSEC.encode(&candidate.hashed_name)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn encloser_candidates_include_root_zone_once() {
+        let root = Name::root();
+        let query = Name::from_ascii("a.example.").unwrap();
+        let candidates = build_encloser_candidates_list(&query, &root, &[], 0);
+        let names: Vec<_> = candidates
+            .into_iter()
+            .map(|candidate| candidate.name)
+            .collect();
+        assert_eq!(
+            names,
+            [query, Name::from_ascii("example.").unwrap(), root.clone()]
+        );
+        let candidates = build_encloser_candidates_list(&root, &root, &[], 0);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name, root);
+    }
+
+    fn proof_record() -> NSEC3 {
+        NSEC3::new(
+            Nsec3HashAlgorithm::SHA1,
+            false,
+            0,
+            Vec::new(),
+            vec![0; 20],
+            vec![RecordType::NS],
+        )
+    }
+
+    #[test]
+    fn cross_zone_negative_responses_are_bogus() {
+        let query = Query::query(Name::from_ascii("www.other.com.").unwrap(), RecordType::A);
+        let zone = Name::from_ascii("example.com.").unwrap();
+        let owner = Name::from_ascii("00000000000000000000000000000000.example.com.").unwrap();
+        let record = proof_record();
+        for response_code in [ResponseCode::NXDomain, ResponseCode::NoError] {
+            assert_eq!(
+                verify_nsec3(&query, &zone, response_code, &[], &[(&owner, &record)]),
+                Proof::Bogus
+            );
+        }
+    }
+
+    #[test]
+    fn cross_zone_wildcard_has_no_encloser_proof() {
+        let query = Name::from_ascii("www.other.com.").unwrap();
+        let zone = Name::from_ascii("example.com.").unwrap();
+        let record = proof_record();
+        let records = [Nsec3RecordPair {
+            base32_hashed_name: b"00000000000000000000000000000000",
+            nsec3_data: &record,
+        }];
+        let proof = wildcard_based_encloser_proof(&query, &zone, &records);
+        assert!(proof.closest_encloser.is_none());
+        assert!(proof.next_closer.is_none());
+        assert!(proof.closest_encloser_wildcard.is_none());
     }
 }
