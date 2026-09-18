@@ -7,8 +7,10 @@
 
 //! dns security extension related modules
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 use core::slice;
 
 #[cfg(feature = "serde")]
@@ -323,13 +325,9 @@ pub enum DnsSecError {
     #[error("hmac validation failure")]
     HmacInvalid,
 
-    /// An error with an arbitrary message, referenced as &'static str
+    /// An error with an arbitrary message
     #[error("{0}")]
-    Message(&'static str),
-
-    /// An error with an arbitrary message, stored as String
-    #[error("{0}")]
-    Msg(String),
+    Message(Cow<'static, str>),
 
     // foreign
     /// An error got returned by the hickory-proto crate
@@ -356,13 +354,13 @@ pub enum DnsSecError {
 
 impl From<String> for DnsSecError {
     fn from(msg: String) -> Self {
-        Self::Msg(msg)
+        Self::Message(msg.into())
     }
 }
 
 impl From<&'static str> for DnsSecError {
     fn from(msg: &'static str) -> Self {
-        Self::Message(msg)
+        Self::Message(msg.into())
     }
 }
 
@@ -371,11 +369,10 @@ impl Clone for DnsSecError {
         use DnsSecError::*;
         match self {
             HmacInvalid => HmacInvalid,
-            Message(msg) => Message(msg),
-            Msg(msg) => Msg(msg.clone()),
+            Message(msg) => Message(msg.clone()),
             // foreign
             Proto(proto) => Proto(proto.clone()),
-            RingKeyRejected(r) => Msg(format!("Ring rejected key: {r}")),
+            RingKeyRejected(r) => Self::from(format!("Ring rejected key: {r}")),
             RingUnspecified(_r) => RingUnspecified(ring_like::Unspecified),
             TsigUnsupportedMacAlgorithm(alg) => TsigUnsupportedMacAlgorithm(alg.clone()),
             TsigWrongKey => TsigWrongKey,
@@ -399,38 +396,54 @@ impl DnssecSummary {
     ///
     /// RRSIGs are skipped, since only the RRSIG used for verification carries the RRset's proof.
     pub fn from_records<'a>(records: impl Iterator<Item = &'a Record>) -> Self {
-        let mut all_secure = None;
+        let mut accumulator: Option<Self> = None;
         for record in records {
             if record.record_type() == RecordType::RRSIG {
                 continue;
             }
 
-            match &record.proof {
-                Proof::Secure => {
-                    all_secure.get_or_insert(true);
-                }
-                Proof::Bogus => return Self::Bogus,
-                _ => all_secure = Some(false),
-            }
+            accumulator = Some(match accumulator {
+                Some(old) => old.update(record.proof),
+                None => Self::from(record.proof),
+            });
         }
 
-        if all_secure.unwrap_or(false) {
-            Self::Secure
-        } else {
-            Self::Insecure
-        }
+        accumulator.unwrap_or(Self::Insecure)
     }
 
     /// Combine this DNSSEC status with another [`Proof`] value.
     pub fn update(self, proof: Proof) -> Self {
-        match (self, proof) {
-            (Self::Secure, Proof::Secure) => Self::Secure,
-            (Self::Bogus, _) | (_, Proof::Bogus) => Self::Bogus,
-            (
-                Self::Secure | Self::Insecure,
-                Proof::Secure | Proof::Insecure | Proof::Indeterminate,
-            ) => Self::Insecure,
+        Ord::min(self, Self::from(proof))
+    }
+}
+
+impl From<Proof> for DnssecSummary {
+    fn from(value: Proof) -> Self {
+        match value {
+            Proof::Secure => Self::Secure,
+            Proof::Insecure | Proof::Indeterminate => Self::Insecure,
+            Proof::Bogus => Self::Bogus,
         }
+    }
+}
+
+impl Ord for DnssecSummary {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Secure, Self::Secure)
+            | (Self::Bogus, Self::Bogus)
+            | (Self::Insecure, Self::Insecure) => Ordering::Equal,
+            (Self::Secure, Self::Insecure | Self::Bogus) => Ordering::Greater,
+            (Self::Bogus, Self::Secure | Self::Insecure) => Ordering::Less,
+            (Self::Insecure, Self::Secure) => Ordering::Less,
+            (Self::Insecure, Self::Bogus) => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for DnssecSummary {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -643,6 +656,149 @@ mod tests {
         assert_eq!(
             DnssecSummary::from_records([].iter()),
             DnssecSummary::Insecure
+        );
+    }
+
+    /// Pin down the behavior of DnssecSummary on all possible combinations of proofs.
+    #[test]
+    fn summary_powerset() {
+        let name = Name::from_ascii("www.example.").unwrap();
+
+        assert_eq!(
+            DnssecSummary::from_records([].iter()),
+            DnssecSummary::Insecure
+        );
+        assert_eq!(
+            DnssecSummary::from_records([a_record(&name, Proof::Secure)].iter()),
+            DnssecSummary::Secure
+        );
+        assert_eq!(
+            DnssecSummary::from_records([a_record(&name, Proof::Insecure)].iter()),
+            DnssecSummary::Insecure
+        );
+        assert_eq!(
+            DnssecSummary::from_records([a_record(&name, Proof::Bogus)].iter()),
+            DnssecSummary::Bogus
+        );
+        assert_eq!(
+            DnssecSummary::from_records([a_record(&name, Proof::Indeterminate)].iter()),
+            DnssecSummary::Insecure
+        );
+        assert_eq!(
+            DnssecSummary::from_records(
+                [
+                    a_record(&name, Proof::Secure),
+                    a_record(&name, Proof::Insecure)
+                ]
+                .iter()
+            ),
+            DnssecSummary::Insecure
+        );
+        assert_eq!(
+            DnssecSummary::from_records(
+                [
+                    a_record(&name, Proof::Secure),
+                    a_record(&name, Proof::Bogus)
+                ]
+                .iter()
+            ),
+            DnssecSummary::Bogus
+        );
+        assert_eq!(
+            DnssecSummary::from_records(
+                [
+                    a_record(&name, Proof::Secure),
+                    a_record(&name, Proof::Indeterminate)
+                ]
+                .iter()
+            ),
+            DnssecSummary::Insecure
+        );
+        assert_eq!(
+            DnssecSummary::from_records(
+                [
+                    a_record(&name, Proof::Insecure),
+                    a_record(&name, Proof::Bogus)
+                ]
+                .iter()
+            ),
+            DnssecSummary::Bogus
+        );
+        assert_eq!(
+            DnssecSummary::from_records(
+                [
+                    a_record(&name, Proof::Insecure),
+                    a_record(&name, Proof::Indeterminate)
+                ]
+                .iter()
+            ),
+            DnssecSummary::Insecure
+        );
+        assert_eq!(
+            DnssecSummary::from_records(
+                [
+                    a_record(&name, Proof::Bogus),
+                    a_record(&name, Proof::Indeterminate)
+                ]
+                .iter()
+            ),
+            DnssecSummary::Bogus
+        );
+        assert_eq!(
+            DnssecSummary::from_records(
+                [
+                    a_record(&name, Proof::Secure),
+                    a_record(&name, Proof::Insecure),
+                    a_record(&name, Proof::Bogus)
+                ]
+                .iter()
+            ),
+            DnssecSummary::Bogus
+        );
+        assert_eq!(
+            DnssecSummary::from_records(
+                [
+                    a_record(&name, Proof::Secure),
+                    a_record(&name, Proof::Insecure),
+                    a_record(&name, Proof::Indeterminate)
+                ]
+                .iter()
+            ),
+            DnssecSummary::Insecure
+        );
+        assert_eq!(
+            DnssecSummary::from_records(
+                [
+                    a_record(&name, Proof::Secure),
+                    a_record(&name, Proof::Bogus),
+                    a_record(&name, Proof::Indeterminate)
+                ]
+                .iter()
+            ),
+            DnssecSummary::Bogus
+        );
+        assert_eq!(
+            DnssecSummary::from_records(
+                [
+                    a_record(&name, Proof::Insecure),
+                    a_record(&name, Proof::Bogus),
+                    a_record(&name, Proof::Indeterminate)
+                ]
+                .iter()
+            ),
+            DnssecSummary::Bogus
+        );
+        assert_eq!(
+            DnssecSummary::from_records(
+                [
+                    a_record(&name, Proof::Secure),
+                    a_record(&name, Proof::Insecure),
+                    a_record(&name, Proof::Bogus),
+                    a_record(&name, Proof::Indeterminate)
+                ]
+                .iter()
+            ),
+            DnssecSummary::Bogus
         );
     }
 }

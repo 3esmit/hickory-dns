@@ -8,9 +8,8 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use futures_util::lock::Mutex;
 use rustls::server::ResolvesServerCert;
-use tokio::{net, task::JoinSet, time::timeout};
+use tokio::{net, task::JoinSet};
 use tracing::{debug, warn};
 
 use super::{
@@ -20,16 +19,17 @@ use super::{
 use crate::{
     net::{
         NetError,
-        quic::{DoqErrorCode, QuicServer, QuicStream, QuicStreams},
+        quic::{QuicServer, QuicStream, QuicStreams},
         xfer::Protocol,
     },
     proto::rr::Record,
+    server::optional_timeout,
     zone_handler::MessageResponse,
 };
 
 pub(super) async fn handle_quic(
     socket: net::UdpSocket,
-    timeout: Duration,
+    timeout: Option<Duration>,
     server_cert_resolver: Arc<dyn ResolvesServerCert>,
     cx: Arc<ServerContext<impl RequestHandler>>,
 ) -> Result<(), NetError> {
@@ -44,33 +44,30 @@ pub(super) async fn handle_quic(
 
 pub(super) async fn handle_quic_with_server(
     mut server: QuicServer,
-    handshake_timeout: Duration,
+    handshake_timeout: Option<Duration>,
     cx: Arc<ServerContext<impl RequestHandler>>,
 ) -> Result<(), NetError> {
     let mut inner_join_set = JoinSet::new();
     loop {
-        let future = cx
-            .shutdown
-            .run_until_cancelled(timeout(handshake_timeout, server.next()));
-        let Some(timeout_result) = future.await else {
+        let future = cx.shutdown.run_until_cancelled(server.next());
+        let Some(incoming_opt) = future.await else {
             break; // A graceful shutdown was initiated. Break out of the loop.
         };
-        let Ok(accept_result) = timeout_result else {
-            warn!("quic timeout expired during handshake");
-            continue;
-        };
-        let (streams, src_addr) = match accept_result {
-            Ok(Some((streams, src_addr))) => (streams, src_addr),
-            Ok(None) => break, // Connection is closed.
-            Err(error) => {
-                debug!(%error, "error receiving quic connection");
-                continue;
-            }
+        let Some(incoming) = incoming_opt else {
+            break; // Connection is closed.
         };
 
-        // Verify that the source address is safe for responses. We're also relying on the quinn
-        // library to actually validate responses before we get here, but this check is still worth
-        // doing.
+        // If the remote address isn't validated, send a retry packet to request that the client try
+        // connecting again, with address validation.
+        if !incoming.remote_address_validated() {
+            if let Err(error) = incoming.retry() {
+                warn!(%error, "could not send retry packet");
+            }
+            continue;
+        }
+
+        // Verify that the source address is safe for responses.
+        let src_addr = incoming.remote_address();
         if let Err(error) = sanitize_src_address(src_addr) {
             warn!(
                 %error, %src_addr,
@@ -79,8 +76,30 @@ pub(super) async fn handle_quic_with_server(
             continue;
         }
 
+        let connecting = match incoming.accept() {
+            Ok(connecting) => connecting,
+            Err(error) => {
+                debug!(%error, "error accepting incoming quic connection");
+                continue;
+            }
+        };
+
         let cx = cx.clone();
         inner_join_set.spawn(async move {
+            let handshake_future = QuicStreams::new(connecting);
+            let Ok(streams_result) = optional_timeout(handshake_timeout, handshake_future).await
+            else {
+                warn!("quic timeout expired during handshake");
+                return;
+            };
+            let streams = match streams_result {
+                Ok(streams) => streams,
+                Err(error) => {
+                    debug!(%error, "error completing incoming quic connection");
+                    return;
+                }
+            };
+
             debug!("starting quic stream request from: {src_addr}");
 
             // TODO: need to consider timeout of total connect...
@@ -100,7 +119,7 @@ pub(super) async fn handle_quic_with_server(
 pub(crate) async fn quic_handler(
     mut quic_streams: QuicStreams,
     src_addr: SocketAddr,
-    quic_timeout: Duration,
+    quic_timeout: Option<Duration>,
     cx: Arc<ServerContext<impl RequestHandler>>,
 ) -> Result<(), NetError> {
     // TODO: we should make this configurable
@@ -110,7 +129,7 @@ pub(crate) async fn quic_handler(
     loop {
         let future = cx
             .shutdown
-            .run_until_cancelled(timeout(quic_timeout, quic_streams.next()));
+            .run_until_cancelled(optional_timeout(quic_timeout, quic_streams.next()));
         let Some(timeout_result) = future.await else {
             break; // A graceful shutdown was initiated.
         };
@@ -128,27 +147,38 @@ pub(crate) async fn quic_handler(
             }
         };
 
-        let Ok(request_res) = timeout(quic_timeout, request_stream.receive_bytes()).await else {
-            break; // Timeout while reading body.
-        };
-        let request = request_res?;
+        let cx = cx.clone();
+        tokio::spawn(async move {
+            let Ok(request_res) =
+                optional_timeout(quic_timeout, request_stream.receive_bytes()).await
+            else {
+                return; // Timeout while reading body.
+            };
+            let request = match request_res {
+                Ok(bytes_mut) => bytes_mut.freeze(),
+                Err(error) => {
+                    warn!(%error, %src_addr, "reading quic request failed");
+                    return;
+                }
+            };
 
-        debug!(
-            "Received bytes {} from {src_addr} {request:?}",
-            request.len()
-        );
+            debug!(
+                "Received bytes {} from {src_addr} {request:?}",
+                request.len()
+            );
 
-        let stream = Arc::new(Mutex::new(request_stream));
-        let responder = QuicResponseHandle(stream.clone());
-
-        cx.handle_request(request.freeze(), src_addr, Protocol::Quic, responder)
+            cx.handle_request(
+                request,
+                src_addr,
+                Protocol::Quic,
+                QuicResponseHandle(request_stream),
+            )
             .await;
+        });
 
         max_requests -= 1;
         if max_requests == 0 {
             warn!("exceeded request count, shutting down quic conn: {src_addr}");
-            // DOQ_NO_ERROR (0x0): No error. This is used when the connection or stream needs to be closed, but there is no error to signal.
-            stream.lock().await.stop(DoqErrorCode::NoError)?;
             break;
         }
         // we'll continue handling requests from here.
@@ -157,8 +187,7 @@ pub(crate) async fn quic_handler(
     Ok(())
 }
 
-#[derive(Clone)]
-struct QuicResponseHandle(Arc<Mutex<QuicStream>>);
+struct QuicResponseHandle(QuicStream);
 
 #[async_trait::async_trait]
 impl ResponseHandler for QuicResponseHandle {
@@ -180,9 +209,9 @@ impl ResponseHandler for QuicResponseHandle {
         let bytes = Bytes::from(bytes);
 
         debug!("sending quic response: {}", bytes.len());
-        let mut lock = self.0.lock().await;
-        lock.send_bytes(bytes).await?;
-        lock.finish().await?;
+        let stream = &mut self.0;
+        stream.send_bytes(bytes).await?;
+        stream.finish().await?;
 
         Ok(info)
     }

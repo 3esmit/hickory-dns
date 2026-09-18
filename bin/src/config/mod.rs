@@ -118,6 +118,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) disable_prometheus: bool,
     /// Timeout associated to a request before it is closed.
+    ///
+    /// Specifying a timeout of zero will disable the timeout.
     #[serde(
         deserialize_with = "parse_request_timeout",
         default = "default_request_timeout"
@@ -144,7 +146,7 @@ pub(crate) struct Config {
     /// Group to run the server as.
     ///
     /// Only supported on Unix-like platforms. If the real or effective UID of the hickory process
-    /// is root, we will attempt to change to this group (or to nobody if no group is specified here.)
+    /// is root, we will attempt to change to this group (or to nogroup if no group is specified here.)
     pub group: Option<String>,
     /// Whether to drop privileges on startup. Defaults to true.
     /// Set to false in container/namespace environments where
@@ -488,6 +490,10 @@ impl ZoneConfig {
     // TODO this is a little ugly for the parse, b/c there is no terminal char
     /// returns the name of the Zone, i.e. the `example.com` of `www.example.com.`
     pub(crate) fn zone(&self) -> Result<Name, ProtoError> {
+        if self.zone.is_empty() {
+            return Err(ProtoError::from("zone name cannot be empty"));
+        }
+
         Name::parse(&self.zone, Some(&Name::new()))
     }
 

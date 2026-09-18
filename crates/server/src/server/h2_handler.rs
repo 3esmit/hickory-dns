@@ -9,13 +9,11 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use ::h2::server;
 use bytes::Bytes;
-use futures_util::lock::Mutex;
 use rustls::server::ResolvesServerCert;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpListener,
     task::JoinSet,
-    time::timeout,
 };
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, warn};
@@ -32,13 +30,14 @@ use crate::{
         xfer::Protocol,
     },
     proto::rr::Record,
+    server::optional_timeout,
     zone_handler::MessageResponse,
 };
 
 /// handle h2 using the default TLS server config.
 pub(super) async fn handle_h2(
     listener: TcpListener,
-    handshake_timeout: Duration,
+    handshake_timeout: Option<Duration>,
     server_cert_resolver: Arc<dyn ResolvesServerCert>,
     dns_hostname: Option<String>,
     http_endpoint: String,
@@ -61,7 +60,7 @@ pub(super) async fn handle_h2(
 /// handle h2 using a specific TlsAcceptor.
 pub(super) async fn handle_h2_with_acceptor(
     listener: TcpListener,
-    handshake_timeout: Duration,
+    handshake_timeout: Option<Duration>,
     tls_acceptor: TlsAcceptor,
     dns_hostname: Option<String>,
     http_endpoint: String,
@@ -73,22 +72,20 @@ pub(super) async fn handle_h2_with_acceptor(
 
     let mut inner_join_set = JoinSet::new();
     loop {
-        let shutdown = cx.shutdown.clone();
-        let (tcp_stream, src_addr) = tokio::select! {
-            tcp_stream = listener.accept() => match tcp_stream {
-                Ok((t, s)) => (t, s),
-                Err(error) => {
-                    debug!(%error, "error receiving HTTPS tcp_stream error");
-                    if is_unrecoverable_socket_error(&error) {
-                        break;
-                    }
-                    continue;
-                },
-            },
-            _ = shutdown.cancelled() => {
-                // A graceful shutdown was initiated. Break out of the loop.
-                break;
-            },
+        let shutdown = &cx.shutdown;
+        let Some(result) = shutdown.run_until_cancelled(listener.accept()).await else {
+            // A graceful shutdown was initiated. Break out of the loop.
+            break;
+        };
+        let (tcp_stream, src_addr) = match result {
+            Ok((tcp_stream, src_addr)) => (tcp_stream, src_addr),
+            Err(error) => {
+                debug!(%error, "error receiving HTTPS tcp_stream error");
+                if is_unrecoverable_socket_error(&error) {
+                    break;
+                }
+                continue;
+            }
         };
 
         // verify that the src address is safe for responses
@@ -106,7 +103,8 @@ pub(super) async fn handle_h2_with_acceptor(
 
             // TODO: need to consider timeout of total connect...
             // take the created stream...
-            let Ok(tls_stream) = timeout(handshake_timeout, tls_acceptor.accept(tcp_stream)).await
+            let Ok(tls_stream) =
+                optional_timeout(handshake_timeout, tls_acceptor.accept(tcp_stream)).await
             else {
                 warn!("https timeout expired during handshake");
                 return;
@@ -145,7 +143,7 @@ pub(super) async fn handle_h2_with_acceptor(
 pub(crate) async fn h2_handler(
     io: impl AsyncRead + AsyncWrite + Unpin,
     src_addr: SocketAddr,
-    h2_timeout: Duration,
+    h2_timeout: Option<Duration>,
     dns_hostname: Option<Arc<str>>,
     http_endpoint: Arc<str>,
     cx: Arc<ServerContext<impl RequestHandler>>,
@@ -167,7 +165,7 @@ pub(crate) async fn h2_handler(
     loop {
         let future = cx
             .shutdown
-            .run_until_cancelled(timeout(h2_timeout, h2.accept()));
+            .run_until_cancelled(optional_timeout(h2_timeout, h2.accept()));
         let Some(timeout_result) = future.await else {
             break; // A graceful shutdown was initiated.
         };
@@ -189,10 +187,9 @@ pub(crate) async fn h2_handler(
         let cx = cx.clone();
         let dns_hostname = dns_hostname.clone();
         let http_endpoint = http_endpoint.clone();
-        let responder = HttpsResponseHandle(Arc::new(Mutex::new(respond)));
         tokio::spawn(async move {
             let message_future = h2::message_from(dns_hostname, http_endpoint, request);
-            let Ok(result) = timeout(h2_timeout, message_future).await else {
+            let Ok(result) = optional_timeout(h2_timeout, message_future).await else {
                 return; // Timeout while reading request.
             };
             let body = match result {
@@ -203,16 +200,20 @@ pub(crate) async fn h2_handler(
                 }
             };
 
-            cx.handle_request(body.freeze(), src_addr, Protocol::Https, responder)
-                .await
+            cx.handle_request(
+                body.freeze(),
+                src_addr,
+                Protocol::Https,
+                HttpsResponseHandle(respond),
+            )
+            .await
         });
 
         // we'll continue handling requests from here.
     }
 }
 
-#[derive(Clone)]
-struct HttpsResponseHandle(Arc<Mutex<server::SendResponse<Bytes>>>);
+struct HttpsResponseHandle(server::SendResponse<Bytes>);
 
 #[async_trait::async_trait]
 impl ResponseHandler for HttpsResponseHandle {
@@ -232,7 +233,7 @@ impl ResponseHandler for HttpsResponseHandle {
         let response = http::response(Version::Http2, bytes.len())?;
 
         debug!("sending response: {:#?}", response);
-        let mut stream = self.0.lock().await.send_response(response, false)?;
+        let mut stream = self.0.send_response(response, false)?;
         stream.send_data(bytes, true)?;
 
         Ok(info)

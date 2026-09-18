@@ -8,11 +8,10 @@
 use std::{net::SocketAddr, sync::Arc, task::Context, time::Duration};
 
 use bytes::{Buf, Bytes};
-use futures_util::lock::Mutex;
 use h3::server::RequestStream;
 use h3_quinn::BidiStream;
 use rustls::server::ResolvesServerCert;
-use tokio::{net, task::JoinSet, time::timeout};
+use tokio::{net, task::JoinSet};
 use tracing::{debug, warn};
 
 use super::{
@@ -30,12 +29,13 @@ use crate::{
         xfer::Protocol,
     },
     proto::rr::Record,
+    server::optional_timeout,
     zone_handler::MessageResponse,
 };
 
 pub(super) async fn handle_h3(
     socket: net::UdpSocket,
-    timeout: Duration,
+    timeout: Option<Duration>,
     server_cert_resolver: Arc<dyn ResolvesServerCert>,
     dns_hostname: Option<String>,
     cx: Arc<ServerContext<impl RequestHandler>>,
@@ -52,7 +52,7 @@ pub(super) async fn handle_h3(
 
 pub(super) async fn handle_h3_with_server(
     mut server: H3Server,
-    handshake_timeout: Duration,
+    handshake_timeout: Option<Duration>,
     dns_hostname: Option<String>,
     cx: Arc<ServerContext<impl RequestHandler>>,
 ) -> Result<(), NetError> {
@@ -60,27 +60,25 @@ pub(super) async fn handle_h3_with_server(
 
     let mut inner_join_set = JoinSet::new();
     loop {
-        let future = cx
-            .shutdown
-            .run_until_cancelled(timeout(handshake_timeout, server.accept()));
-        let Some(timeout_result) = future.await else {
+        let future = cx.shutdown.run_until_cancelled(server.accept());
+        let Some(incoming_opt) = future.await else {
             break; // A graceful shutdown was initiated. Break out of the loop.
         };
-        let Ok(result) = timeout_result else {
-            warn!("h3 timeout expired during handshake");
-            continue;
-        };
-        let (connection, src_addr) = match result {
-            Ok(Some((connection, src_addr))) => (connection, src_addr),
-            Ok(None) => break, // Connection is closed.
-            Err(error) => {
-                debug!(%error, "error receiving h3 connection");
-                continue;
-            }
+        let Some(incoming) = incoming_opt else {
+            break; // Connection is closed.
         };
 
-        // verify that the src address is safe for responses
-        // TODO: we're relying the quinn library to actually validate responses before we get here, but this check is still worth doing
+        // If the remote address isn't validated, send a retry packet to request that the client try
+        // connecting again, with address validation.
+        if !incoming.remote_address_validated() {
+            if let Err(error) = incoming.retry() {
+                warn!(%error, "could not send retry packet");
+            }
+            continue;
+        }
+
+        // Verify that the source address is safe for responses.
+        let src_addr = incoming.remote_address();
         if let Err(error) = sanitize_src_address(src_addr) {
             warn!(
                 %error, %src_addr,
@@ -89,9 +87,31 @@ pub(super) async fn handle_h3_with_server(
             continue;
         }
 
+        let connecting = match incoming.accept() {
+            Ok(connecting) => connecting,
+            Err(error) => {
+                debug!(%error, "error accepting incoming h3 connection");
+                continue;
+            }
+        };
+
         let cx = cx.clone();
         let dns_hostname = dns_hostname.clone();
         inner_join_set.spawn(async move {
+            let handshake_future = H3Connection::new(connecting);
+            let Ok(connection_result) = optional_timeout(handshake_timeout, handshake_future).await
+            else {
+                warn!("h3 timeout expired during handshake");
+                return;
+            };
+            let connection = match connection_result {
+                Ok(connection) => connection,
+                Err(error) => {
+                    debug!(%error, "error establishing incoming h3 connection");
+                    return;
+                }
+            };
+
             debug!("starting h3 stream request from: {src_addr}");
 
             // TODO: need to consider timeout of total connect...
@@ -112,7 +132,7 @@ pub(super) async fn handle_h3_with_server(
 pub(crate) async fn h3_handler(
     mut connection: H3Connection,
     src_addr: SocketAddr,
-    h3_timeout: Duration,
+    h3_timeout: Option<Duration>,
     _dns_hostname: Option<Arc<str>>,
     cx: Arc<ServerContext<impl RequestHandler>>,
 ) -> Result<(), NetError> {
@@ -123,43 +143,57 @@ pub(crate) async fn h3_handler(
     loop {
         let future = cx
             .shutdown
-            .run_until_cancelled(timeout(h3_timeout, connection.accept()));
+            .run_until_cancelled(optional_timeout(h3_timeout, connection.accept()));
         let Some(timeout_result) = future.await else {
             break; // A graceful shutdown was initiated.
         };
-        let Ok(accept_option) = timeout_result else {
+        let Ok(accept_result) = timeout_result else {
             break; // Timeout elapsed while waiting for a request.
         };
-        let Some(result) = accept_option else {
-            break; // The connection is closed.
-        };
-        let mut stream = match result {
-            Ok((_request, request_stream)) => request_stream,
+        let request_resolver_opt = match accept_result {
+            Ok(request_resolver_opt) => request_resolver_opt,
             Err(error) => {
-                warn!("error accepting request {}: {}", src_addr, error);
+                warn!(%src_addr, %error, "error accepting request");
                 return Err(error);
             }
         };
-
-        let fetch_future = fetch_body(
-            BodyStream::from(|cx: &mut Context<'_>| stream.poll_recv_data(cx)),
-            None,
-        );
-        let Ok(request_res) = timeout(h3_timeout, fetch_future).await else {
-            break; //Timeout while reading request.
+        let Some(request_resolver) = request_resolver_opt else {
+            break; // The connection is closed.
         };
-        let request = request_res?;
-
-        debug!(
-            "Received bytes {} from {src_addr} {request:?}",
-            request.remaining()
-        );
 
         let cx = cx.clone();
-        let stream = Arc::new(Mutex::new(stream));
-        let responder = H3ResponseHandle(stream.clone());
         tokio::spawn(async move {
-            cx.handle_request(request.freeze(), src_addr, Protocol::H3, responder)
+            let mut stream = match request_resolver.resolve_request().await {
+                Ok((_request, stream)) => stream,
+                Err(error) => {
+                    warn!(%error, "error receiving request headers");
+                    return;
+                }
+            };
+
+            let fetch_future = fetch_body(
+                BodyStream::from(|cx: &mut Context<'_>| stream.poll_recv_data(cx)),
+                None,
+            );
+            let Ok(request_res) = optional_timeout(h3_timeout, fetch_future).await else {
+                return; //Timeout while reading request.
+            };
+            let request = match request_res {
+                Ok(bytes_mut) => bytes_mut.freeze(),
+                Err(error) => {
+                    warn!(%error, "error receiving request body");
+                    return;
+                }
+            };
+
+            debug!(
+                %src_addr,
+                bytes = request.remaining(),
+                ?request,
+                "Received request body"
+            );
+
+            cx.handle_request(request, src_addr, Protocol::H3, H3ResponseHandle(stream))
                 .await
         });
 
@@ -175,8 +209,7 @@ pub(crate) async fn h3_handler(
     Ok(())
 }
 
-#[derive(Clone)]
-struct H3ResponseHandle(Arc<Mutex<RequestStream<BidiStream<Bytes>, Bytes>>>);
+struct H3ResponseHandle(RequestStream<BidiStream<Bytes>, Bytes>);
 
 #[async_trait::async_trait]
 impl ResponseHandler for H3ResponseHandle {
@@ -196,7 +229,7 @@ impl ResponseHandler for H3ResponseHandle {
         let response = http::response(Version::Http3, bytes.len())?;
 
         debug!("sending response: {:#?}", response);
-        let mut stream = self.0.lock().await;
+        let stream = &mut self.0;
         stream.send_response(response).await?;
         stream.send_data(bytes).await?;
         stream.finish().await?;
